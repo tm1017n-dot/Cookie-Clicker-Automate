@@ -1,0 +1,65 @@
+import { DEFAULT_CONFIG, ENGINE_VERSION } from '../core/contracts.mjs';
+import { plan } from '../core/planner.mjs';
+import { Executor } from './executor.mjs';
+import { bundle, Diagnostics } from './diagnostics.mjs';
+
+export const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
+export class Coordinator {
+  constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
+    this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
+    this.clock=clock;this.onUpdate=onUpdate;this.version=ENGINE_VERSION;
+    this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
+    this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
+    this.executor=new Executor(adapter,()=>this.owns(),clock);
+    this.snapshot=()=>this.diagnostics.latest();
+  }
+  owns(){return !this.stopped && this.page[RUNTIME_KEY]===this;}
+  async start({timers=true}={}){
+    const old=this.page[RUNTIME_KEY];
+    if(old?.shutdown)old.shutdown('new-version');
+    this.page[RUNTIME_KEY]=this;
+    await this.diagnostics.open();
+    if(!this.owns())return;
+    if(timers){
+      this.timers.push(setInterval(()=>this.tick(),this.config.purchaseIntervalMs));
+      this.timers.push(setInterval(()=>this.clickTick(),Math.max(20,1000/Math.max(1,this.config.clickRate))));
+      this.timers.push(setInterval(()=>this.collectTick(),150));
+    }
+    this.onUpdate(this);
+  }
+  clickRate(){const now=this.clock();this.clicks=this.clicks.filter(t=>now-t<=5000);return now-this.started<5000?this.config.clickRate:this.clicks.length/5;}
+  clickTick(){if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;try{if(this.adapter.click())this.clicks.push(this.clock());}catch(e){this.error=e.message;this.onUpdate(this);}}
+  collectTick(){if(!this.owns() || this.config.observeOnly || this.error)return;try{this.adapter.collect(this.config);}catch(e){this.error=e.message;this.onUpdate(this);}}
+  async tick(){
+    if(!this.owns() || this.running || this.adapter.fault || this.error==='purchase-result-unresolved')return;
+    this.running=true;
+    try{
+      this.error=null;
+      const pending=this.executor.poll();
+      if(pending){
+        if(pending.status==='pending')return;
+        if(this.last){this.last.receipt=pending;await this.diagnostics.save(this.last);}
+        if(pending.status==='unresolved')throw new Error('purchase-result-unresolved');
+        if(pending.status==='confirmed' && this.commitment?.targetId===pending.actionId)this.commitment=null;
+      }
+      const input=this.adapter.capture(this.config,this.commitment,this.config.autoClick?this.clickRate():0);
+      const decision=plan(input);
+      const record=await bundle(input,decision,this.token+':'+(++this.cycle));
+      await this.diagnostics.save(record);
+      if(!this.owns())return;
+      this.commitment=decision.nextCommitment;
+      if(!this.config.observeOnly){
+        record.receipt=this.executor.execute(decision,input,record.cycleId);
+        if(record.receipt.status==='confirmed' && this.commitment?.targetId===record.receipt.actionId)this.commitment=null;
+        // An exception stops just this purchase cycle; the next cycle recaptures unless restore failed.
+        if(this.adapter.fault)throw new Error(this.adapter.fault);
+        await this.diagnostics.save(record);
+      }
+      this.last=record;
+    }catch(error){
+      this.error=String(error.message);
+    }finally{this.running=false;this.onUpdate(this);}
+  }
+  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.onUpdate(this);}
+  shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
+}

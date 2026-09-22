@@ -1,5 +1,9 @@
 # 引き継ぎ資料
 
+## 2026-09-23 再構築版の追加
+
+`feat/rebuild-engine` に9.0.0-alpha.1の基本購入エンジン、配布userscript、回帰試験と実測fixtureを追加した。[導入・実装状況・未完了](rebuild/IMPLEMENTATION.md)を最初に確認すること。M5〜M7と全TEST_PLANの完了は未達。以下の旧版分析は背景情報として保持する。
+
 ## 1. 目的
 
 Tampermonkey上でCookie Clickerを自動プレイし、単純な最安購入や単発ROIではなく、進行段階に応じた最短成長を実現する。購入、クリック、Golden Cookie、Grimoire、Pantheon、Krumblor、Garden、Stock Market、Research、Season、Grandmapocalypse、Ascensionを最終的に一つの戦略へ統合する。

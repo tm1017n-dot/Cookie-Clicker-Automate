@@ -1,0 +1,9 @@
+[
+  {"id":"VALUE-01","provenance":"synthetic","bank":500,"income":10,"offers":[["upgrade:1",500,50],["building:1",400,2]],"expected":"upgrade:1"},
+  {"id":"VALUE-02","provenance":"synthetic","bank":500,"income":10,"offers":[["upgrade:1",500,1],["building:1",400,20]],"expected":"building:1"},
+  {"id":"VALUE-03","provenance":"synthetic","bank":400,"income":10,"offers":[["upgrade:1",500,50],["building:1",400,2]],"expected":"wait","target":"upgrade:1"},
+  {"id":"VALUE-04","provenance":"synthetic","bank":400,"income":10,"offers":[["upgrade:1",500,50],["building:1",400,2]],"expected":"wait","target":"upgrade:1","priority":false,"critical":false},
+  {"id":"REC-02","provenance":"synthetic","bank":500,"income":10,"offers":[["building:1",100,0.5],["building:2",500,20]],"expected":"building:2"},
+  {"id":"RES-04","provenance":"synthetic","bank":100,"income":10,"offers":[["upgrade:1",1000,100],["building:1",100,20]],"commitment":"upgrade:1","expected":"building:1"},
+  {"id":"RES-05","provenance":"synthetic","bank":100,"income":10,"offers":[["upgrade:1",1000,100],["building:1",100,0.1]],"commitment":"upgrade:1","expected":"wait","target":"upgrade:1"}
+]
