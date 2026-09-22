@@ -100,4 +100,14 @@ wealth(H) = cookies_after_action + effective_income_after_action * (H - wait)
 - 購入成功は施設数または`bought`変化で確認する。
 - セーブ破壊、Ascend自動確定、Sugar Lump不可逆操作は別承認設定にする。
 
+## 8. 詳細設計と用語の具体化
 
+[詳細設計索引](rebuild/README.md) を本仕様の実装契約として参照する。
+
+- 価値関数のcookies_after_actionには、購入前の待機中に得た収益と購入費を反映する。実装では [PLANNER](rebuild/PLANNER.md) の時間イベントごとの積分を使う。
+- deltaLiquidCpsは受動の流動収益差とクリック収益差の合計、deltaEconomicCpsはそれに未回収資産増加率差を加えた値。deltaClickCpsは内訳であり、再度加算しない。
+- クリック込みの総合評価と、Lucky等のゲーム固有通常CpS式を区別する。
+- unlockValue/comboValueは計上済み報酬と重複しない残存価値のみ。
+- 固定期間で長期投資を永久に拒否しないよう、候補共通の期間延長規則を用いる。これは固定待機上限ではない。
+- 候補生成の局所失敗、探索予算超過、Game API例外を区別する。Game API例外周期には購入しない。
+- 未対応ミニゲーム操作は能力不足を明示し、助言/観測から段階導入する。

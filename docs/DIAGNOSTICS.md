@@ -35,4 +35,12 @@
 
 新規セーブで開始し、各購入前にスナップショットを保存する。最低限、Cursor 1、Upgrade ID 0、Upgrade ID 1、Grandma、Farm、Mine、Factory、各最初のTier Upgradeまで追跡する。期待と異なる最初の周期で停止し、その状態をfixture化する。
 
+## 新エンジンの記録契約
 
+[DATA_CONTRACTS](rebuild/DATA_CONTRACTS.md) をJSON形式、単位、数値異常、版、リプレイの正本とする。上記切り分け順序のROI/ETA/Beam各層はv8.5の診断用であり、新エンジンではPlanner内の候補評価・frontier・探索・予約制約を追跡する。
+
+- 出力時に再計算せず、その周期のPlannerInput、DecisionRecord、ExecutionReceiptを保存する。
+- 全候補、採用/不採用理由、効果根拠、各期間価値、ETA比較、探索打切り、runtime tokenを記録する。
+- 最終決定者はplannerに固定。Executorが別候補へ変更していないことを検証する。
+- schema/engine/ruleset版の不一致では再生成功を装わない。
+- 保存容量不足や不完全ログは明示し、実画面試験では停止する。
