@@ -1,0 +1,4072 @@
+// ==UserScript==
+// @name         Cookie Clicker Smart Auto Player
+// @namespace    cc-smart-auto
+// @version      8.5.0
+// @description  Cookie Clicker auto player with long-horizon Upgrade valuation, click-inclusive economics and adaptive ETA saving.
+// @match        https://orteil.dashnet.org/cookieclicker/*
+// @match        http://orteil.dashnet.org/cookieclicker/*
+// @grant        unsafeWindow
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const PageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const STORAGE_KEY = 'CC_SMART_AUTO_SETTINGS_V32';
+    const VERSION = '8.5';
+    const RUNTIME_KEY = '__CC_SMART_AUTO_RUNTIME__';
+    const instanceToken = `${VERSION}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const previousRuntime = PageWindow[RUNTIME_KEY];
+    if (previousRuntime && typeof previousRuntime.shutdown === 'function') {
+        try { previousRuntime.shutdown('new-version'); } catch (_) {}
+    }
+    const runtime = { version: VERSION, token: instanceToken, startedAt: Date.now(), shutdown: null, snapshot: null };
+    PageWindow[RUNTIME_KEY] = runtime;
+
+    const STRATEGY = Object.freeze({
+        BOOTSTRAP: 'BOOTSTRAP',
+        UNLOCK: 'UNLOCK',
+        BUILD: 'BUILD',
+        COMBO_PREP: 'COMBO_PREP',
+        COMBO_WAIT: 'COMBO_WAIT',
+        COMBO_EXECUTE: 'COMBO_EXECUTE',
+        WINDFALL_SPEND: 'WINDFALL_SPEND',
+        SEASON_RESEARCH: 'SEASON_RESEARCH',
+        ASCEND_READY: 'ASCEND_READY'
+    });
+
+    // ---------------------------------------------------------------------
+    // 攻略Wiki（Web版 v2.058）で確認した、施設数以外の主要Unlock条件。
+    // 施設Tier/Synergy/建物実績は、可能な限りGameオブジェクトの実データを使う。
+    // ---------------------------------------------------------------------
+
+    const MOUSE_UNLOCKS = [
+        ['Plastic mouse', 1e3],
+        ['Iron mouse', 1e5],
+        ['Titanium mouse', 1e7],
+        ['Adamantium mouse', 1e9],
+        ['Unobtainium mouse', 1e11],
+        ['Eludium mouse', 1e13],
+        ['Wishalloy mouse', 1e15],
+        ['Fantasteel mouse', 1e17],
+        ['Nevercrack mouse', 1e19],
+        ['Armythril mouse', 1e21],
+        ['Technobsidian mouse', 1e23],
+        ['Plasmarble mouse', 1e25],
+        ['Miraculite mouse', 1e27],
+        ['Aetherice mouse', 1e29],
+        ['Omniplast mouse', 1e31]
+    ];
+
+    const KITTEN_UNLOCKS = [
+        ['Kitten helpers', 13],
+        ['Kitten workers', 25],
+        ['Kitten engineers', 50],
+        ['Kitten overseers', 75],
+        ['Kitten managers', 100],
+        ['Kitten accountants', 125],
+        ['Kitten specialists', 150],
+        ['Kitten experts', 175],
+        ['Kitten consultants', 200],
+        ['Kitten assistants to the regional manager', 225],
+        ['Kitten marketeers', 250],
+        ['Kitten analysts', 275],
+        ['Kitten executives', 300],
+        ['Kitten admins', 325],
+        ['Kitten strategists', 350]
+    ];
+
+    const GOLDEN_UNLOCKS = [
+        ['Lucky day', 7],
+        ['Serendipity', 27],
+        ['Get lucky', 77]
+    ];
+
+    const ASCEND_EARLY_TARGETS = [365, 2550, 14851, 77068, 204844];
+
+    const NEVER_AUTO_BUY = new Set([
+        'chocolate egg'
+    ]);
+
+    const STRATEGIC_UPGRADES = {
+        'lucky day': { kind: 'gc', label: 'Golden Cookie頻度・表示時間強化', critical: true },
+        'serendipity': { kind: 'gc', label: 'Golden Cookie頻度・表示時間強化', critical: true },
+        'get lucky': { kind: 'gc', label: 'Golden Cookie効果時間2倍', critical: true },
+        'golden goose egg': { kind: 'gc', label: 'Golden Cookie頻度強化' },
+        'green yeast digestives': { kind: 'gc', label: 'Golden Cookie強化' },
+        'dragon fang': { kind: 'gc', label: 'Golden Cookie/Dragon系強化' },
+        'season savings': { kind: 'discount', label: '施設価格割引' },
+        "santa's dominion": { kind: 'discount', label: '施設・Upgrade価格割引' },
+        'faberge egg': { kind: 'discount', label: 'Upgrade価格割引' },
+        'bingo center/research facility': { kind: 'research', label: 'Researchチェーン開始' }
+    };
+
+    // 表示言語に関係なく内部名で判定できる、序盤のクリック2倍Upgrade。
+    const EARLY_CLICK_MULTIPLIER_UPGRADES = new Set([
+        'reinforced index finger',
+        'carpal tunnel prevention cream',
+        'ambidextrous'
+    ]);
+
+    const defaultSettings = {
+        master: true,
+
+        autoClick: true,
+        clicksPerSecond: 20,
+
+        goldenCookie: true,
+        wrathCookie: false,
+        reindeer: true,
+        autoFortuneTicker: true,
+
+        autoBuy: true,
+        buyBuildings: true,
+        buyUpgrades: true,
+        buyResearch: false,
+        buyUtility: true,
+
+        unlockPlanner: true,
+        futureAware: true,
+
+        // Target ETA: 今買える候補Aが、高価なUpgrade Bへの到達を何秒短縮するかを評価する。
+        targetEtaEnabled: true,
+        targetEtaMaxTargets: 8,
+        targetEtaMinDirectSeconds: 15,
+        targetEtaMinSavingSeconds: 2,
+        targetEtaWeight: 0.70,
+
+        // v8.5: 日本語環境でも内部名からクリックUpgradeを認識し、Upgrade予約購入を独立経路として追加し、価格帯ではなく、複数期間の純増加資産と恒久効果で施設と比較する。
+        beamPlannerEnabled: true,
+        beamDepth: 3,
+        beamWidth: 8,
+        beamBranchLimit: 8,
+        beamHorizonSeconds: 600,
+        beamTimeBudgetMs: 120,
+        waitActionsSeconds: [30, 60],
+        plannerWaitMargin: 0.05,
+        targetedWaitMaxSeconds: 120,
+        chainEtaEnabled: true,
+        chainEtaWeight: 0.65,
+        chainEtaMaxTargets: 6,
+        comboValueWeight: 0.70,
+        unlockChainWeight: 0.85,
+        strategyStateMachine: true,
+        strictPurchaseProgress: true,
+        automaticStrategyReserve: false,
+        efficiencyMode: true,
+        openingBookEnabled: true,
+        effectAwareUpgradeValuation: true,
+        permanentUpgradeBonus: 0.90,
+        upgradePriorityMultiplier: 0.72,
+        strategicUpgradeMultiplier: 0.60,
+        upgradePreferenceTolerance: 1.20,
+        plannerUpgradeSlots: 3,
+        horizonShortSeconds: 60,
+        horizonMediumSeconds: 300,
+        horizonLongSeconds: 900,
+        horizonValueWeight: 0.45,
+        boundedStrategicWait: true,
+        normalWaitMaxSeconds: 45,
+        criticalWaitMaxSeconds: 150,
+        openingWaitMaxSeconds: 45,
+        boundedWaitMaxCycles: 100,
+        waitMinEtaSavingSeconds: 3,
+        waitMinEtaSavingRatio: 0.10,
+        waitTargetScoreTolerance: 1.25,
+        dominantUpgradeWaitMinSeconds: 0.001,
+        dominantUpgradeWaitMinRatio: 0.000001,
+        upgradeReservationEnabled: true,
+        upgradeReservationMaxEtaSeconds: 180,
+        upgradeReservationMaxPaybackSeconds: 1800,
+        upgradeReservationMinNetRatio: 1.05,
+
+        tierLookahead: true,
+        synergyLookahead: true,
+        achievementLookahead: true,
+        researchLookahead: true,
+        lookaheadMaxUnits: 80,
+        // 解禁計画の「次の一手」が今買える場合、現在候補より大幅に有利なら採用。
+        futureStepAdvantage: 0.65,
+        upgradeBias: 0.97,
+        utilityMaxSeconds: 30,
+        maxPurchaseAttempts: 8,
+        // デフォルトOFF。Buff中でも通常は購入を継続する。
+        pausePurchasesDuringCombos: false,
+
+        keepLuckyBank: false,
+
+        autoGrimoire: true,
+        fthofMinBuffMultiplier: 6,
+
+        autoWrinklers: true,
+        wrinklerMode: 'smart',
+        wrinklerPopMinWaitSeconds: 120,
+        autoPledge: false,
+
+        ascendAdvisor: true,
+        ascendStrongGainRatio: 1.0,
+        ascendConsiderGainRatio: 0.5,
+
+        purchaseIntervalMs: 1500,
+        shimmerIntervalMs: 150,
+        strategyIntervalMs: 1000,
+
+        panelCollapsed: false,
+        panelWidth: 420,
+        panelHeight: 760,
+        panelLeft: 14,
+        panelTop: 80,
+
+        sectionCollapsed: {
+            click: false,
+            shimmer: false,
+            buy: false,
+            strategy: false,
+            unlocks: false,
+            grimoire: false,
+            grandmapocalypse: false,
+            bank: false,
+            ascend: false,
+            status: false
+        }
+    };
+
+    let settings = loadSettings();
+    let Game = null;
+    let panel = null;
+    let resizeObserver = null;
+    let evaluating = false;
+
+    let lastDecision = null;
+    let lastCandidates = [];
+    let lastUnlockGoals = [];
+    let lastActionText = '待機中';
+    let lastSpellText = '未実行';
+    let lastWrinklerText = '待機中';
+    let lastPurchaseError = '';
+    let consecutiveNoPurchase = 0;
+    let reservedUpgrade = { id: null, name: '', startedAt: 0 };
+    let lastPurchaseSuccessAt = 0;
+    let boundedWaitGuard = { key: '', cycles: 0, startedAt: 0 };
+    let openingWaitGuard = { cycles: 0, startedAt: 0 };
+    let strategyState = STRATEGY.BOOTSTRAP;
+    let strategyReason = '初期状態を確認中';
+    let strategyChangedAt = Date.now();
+    let lastStrategyCookies = 0;
+    let windfallUntil = 0;
+    let lastBeamPlan = [];
+    let lastBeamUtility = 0;
+    let purchaseDiag = {
+        loops: 0,
+        lastRun: '-',
+        currentCount: 0,
+        affordableCount: 0,
+        fallbackAffordableCount: 0,
+        rawAffordableCount: 0,
+        reserveBlockedCount: 0,
+        futureCount: 0,
+        selected: '-',
+        decision: '-',
+        attempts: 0,
+        lastSuccess: '-',
+        pausedReason: '',
+        etaCandidate: '-',
+        etaTarget: '-',
+        etaKind: 'ETA',
+        etaDirect: 0,
+        etaVia: 0,
+        etaSaved: 0,
+        etaSavedRatio: 0,
+        etaTargetsEvaluated: 0,
+        beamExpanded: 0,
+        beamDepth: 0,
+        beamUtility: 0,
+        beamPlan: '-',
+        beamTimedOut: false
+    };
+
+    const timers = {
+        click: null,
+        shimmer: null,
+        purchase: null,
+        strategy: null,
+        ui: null
+    };
+
+    // =====================================================================
+    // 設定
+    // =====================================================================
+
+    function loadSettings() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+            return {
+                ...defaultSettings,
+                ...saved,
+                sectionCollapsed: {
+                    ...defaultSettings.sectionCollapsed,
+                    ...(saved.sectionCollapsed || {})
+                }
+            };
+        } catch (e) {
+            console.warn('[CC Auto] settings load failed', e);
+            return JSON.parse(JSON.stringify(defaultSettings));
+        }
+    }
+
+    function saveSettings() {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        } catch (e) {
+            console.warn('[CC Auto] settings save failed', e);
+        }
+    }
+
+    function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+    }
+
+    function finite(value, fallback = 0) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : fallback;
+    }
+
+    // =====================================================================
+    // 起動
+    // =====================================================================
+
+    function waitForGame() {
+        if (PageWindow[RUNTIME_KEY] !== runtime) return;
+        const pageGame = PageWindow.Game;
+        if (!pageGame || !pageGame.ready || !pageGame.ObjectsById) {
+            setTimeout(waitForGame, 1000);
+            return;
+        }
+        Game = pageGame;
+        initialize();
+    }
+
+    function initialize() {
+        if (PageWindow[RUNTIME_KEY] !== runtime) return;
+        runtime.shutdown = shutdown;
+        runtime.snapshot = diagnosticSnapshot;
+        createPanel();
+        restartTimers();
+        try {
+            Game.Notify('Smart Auto Player', `Smart Auto v${VERSION} を起動しました。`, [10, 14], 4);
+        } catch (_) {}
+        console.log(`[CC Auto] v${VERSION} / game ${Game.version}`);
+    }
+
+    function shutdown(reason = 'manual') {
+        clearTimers();
+        try { if (resizeObserver) resizeObserver.disconnect(); } catch (_) {}
+        try { if (panel && panel.parentNode) panel.parentNode.removeChild(panel); } catch (_) {}
+        panel = null;
+        console.log(`[CC Auto] v${VERSION} stopped: ${reason}`);
+    }
+
+    function diagnosticSnapshot() {
+        let upgrades = [];
+        try {
+            upgrades = getUpgradeCandidates().map((c) => ({
+                name: c.name, price: c.immediatePrice, delta: c.deltaEconomic,
+                wait: c.waitSeconds, repay: c.repaySeconds, score: c.score,
+                priority: Boolean(c.upgradePriority), model: c.upgradeValueModel, reason: c.reason
+            }));
+        } catch (e) { upgrades = [{ error: String(e && e.message || e) }]; }
+        return {
+            version: VERSION, token: instanceToken, active: PageWindow[RUNTIME_KEY] === runtime,
+            cookies: Game ? Game.cookies : null, income: Game ? liquidIncome() : null,
+            clickIncome: Game ? clickIncome() : null, reservedUpgrade: { ...reservedUpgrade },
+            decision: purchaseDiag.decision, selected: purchaseDiag.selected, upgrades
+        };
+    }
+
+    function gamePlayable() {
+        return Boolean(Game && Game.ready && !Game.AscendTimer && !Game.OnAscend);
+    }
+
+    // =====================================================================
+    // Strategy State Machine - v8.5
+    // =====================================================================
+
+    function setStrategyState(next, reason) {
+        if (!next) next = STRATEGY.BUILD;
+        if (strategyState !== next) strategyChangedAt = Date.now();
+        strategyState = next;
+        strategyReason = reason || '';
+    }
+
+    function totalBuildingsOwned() {
+        return (Game.ObjectsById || []).reduce((sum, obj) => sum + Math.max(0, finite(obj && obj.amount, 0)), 0);
+    }
+
+    function missingCoreGoldenUpgrades() {
+        return ['Lucky day', 'Serendipity', 'Get lucky'].filter((name) => !hasUpgrade(name));
+    }
+
+    function grimoireStatus() {
+        const M = getGrimoire();
+        if (!M || !M.spells || typeof M.getSpellCost !== 'function') return { available: false, ready: false, magic: 0, cost: Infinity };
+        const spell = M.spells['hand of fate'];
+        if (!spell) return { available: false, ready: false, magic: finite(M.magic, 0), cost: Infinity };
+        const cost = finite(M.getSpellCost(spell), Infinity);
+        const magic = finite(M.magic, 0);
+        return { available: true, ready: Number.isFinite(cost) && magic >= cost, magic, cost };
+    }
+
+    function isClickComboActive() {
+        return hasBuff('Click frenzy') || hasBuff('Dragonflight') || hasBuff('Elder frenzy');
+    }
+
+    function hasNaturalComboStarter() {
+        if (hasBuff('Frenzy') || hasBuff('Dragon Harvest')) return true;
+        try {
+            return Object.keys(Game.buffs || {}).some((name) => String(name).toLowerCase().includes('building special'));
+        } catch (_) { return false; }
+    }
+
+    function seasonWorkRemaining() {
+        if (!Game.season) return false;
+        return (Game.UpgradesById || []).some((up) => up && !up.bought && up.season === Game.season);
+    }
+
+    function updateStrategyState() {
+        if (!Game || !gamePlayable()) return strategyState;
+
+        const now = Date.now();
+        const cookies = Math.max(0, finite(Game.cookies, 0));
+        const previous = Math.max(0, lastStrategyCookies);
+        const base = Math.max(1, finite(Game.unbuffedCps, finite(Game.cookiesPs, 0)));
+        if (previous > 0 && cookies - previous >= base * 600) windfallUntil = now + 30000;
+        lastStrategyCookies = cookies;
+
+        if (!settings.strategyStateMachine) {
+            setStrategyState(STRATEGY.BUILD, '状態機械OFF');
+            return strategyState;
+        }
+
+        const ascend = getAscendAdvice();
+        const grimoire = grimoireStatus();
+        const missingGolden = missingCoreGoldenUpgrades();
+
+        if (isClickComboActive()) {
+            setStrategyState(STRATEGY.COMBO_EXECUTE, 'クリック系コンボを実行中');
+        } else if (now < windfallUntil) {
+            setStrategyState(STRATEGY.WINDFALL_SPEND, '直近の大収益を次の成長へ再投資');
+        } else if (ascend && ascend.level === 'strong') {
+            setStrategyState(STRATEGY.ASCEND_READY, ascend.message);
+        } else if (finite(Game.cookiesEarned, 0) < 1e6 || totalBuildingsOwned() < 15) {
+            setStrategyState(STRATEGY.BOOTSTRAP, '基礎生産と初期施設を構築');
+        } else if (missingGolden.length || !grimoire.available) {
+            setStrategyState(STRATEGY.UNLOCK, `主要機能を解禁：${missingGolden[0] || 'Grimoire'}`);
+        } else if ((settings.buyResearch && finite(Game.researchT, -1) > 0) || seasonWorkRemaining()) {
+            setStrategyState(STRATEGY.SEASON_RESEARCH, '季節またはResearchの恒久進行を処理');
+        } else if (grimoire.ready && hasNaturalComboStarter()) {
+            setStrategyState(STRATEGY.COMBO_EXECUTE, 'Natural buffとFtHoFを重ねる');
+        } else if (grimoire.ready) {
+            setStrategyState(STRATEGY.COMBO_WAIT, 'Magicを保持しNatural Golden Cookieを待つ');
+        } else if (grimoire.available) {
+            setStrategyState(STRATEGY.COMBO_PREP, `Magicを準備 ${grimoire.magic.toFixed(1)} / ${Number.isFinite(grimoire.cost) ? grimoire.cost.toFixed(1) : '-'}`);
+        } else {
+            setStrategyState(STRATEGY.BUILD, '次の解禁とコンボ能力を構築');
+        }
+        return strategyState;
+    }
+
+    function strategyWeights() {
+        const map = {
+            [STRATEGY.BOOTSTRAP]: { production: 1.35, unlock: 1.00, combo: 0.25, liquidity: 0.20 },
+            [STRATEGY.UNLOCK]: { production: 0.85, unlock: 1.65, combo: 0.55, liquidity: 0.35 },
+            [STRATEGY.BUILD]: { production: 1.15, unlock: 1.00, combo: 0.80, liquidity: 0.45 },
+            [STRATEGY.COMBO_PREP]: { production: 0.70, unlock: 0.65, combo: 1.55, liquidity: 1.25 },
+            [STRATEGY.COMBO_WAIT]: { production: 0.30, unlock: 0.30, combo: 1.80, liquidity: 1.70 },
+            [STRATEGY.COMBO_EXECUTE]: { production: 0.20, unlock: 0.20, combo: 2.00, liquidity: 2.00 },
+            [STRATEGY.WINDFALL_SPEND]: { production: 1.45, unlock: 1.25, combo: 1.00, liquidity: 0.10 },
+            [STRATEGY.SEASON_RESEARCH]: { production: 0.65, unlock: 1.55, combo: 0.55, liquidity: 0.45 },
+            [STRATEGY.ASCEND_READY]: { production: 0.55, unlock: 0.70, combo: 1.00, liquidity: 1.35 }
+        };
+        return map[strategyState] || map[STRATEGY.BUILD];
+    }
+
+    // =====================================================================
+    // タイマー
+    // =====================================================================
+
+    function clearTimers() {
+        for (const key of Object.keys(timers)) {
+            if (timers[key]) clearInterval(timers[key]);
+            timers[key] = null;
+        }
+    }
+
+    function restartTimers() {
+        clearTimers();
+
+        const clickRate = clamp(finite(settings.clicksPerSecond, 20), 1, 100);
+        timers.click = setInterval(() => {
+            if (PageWindow[RUNTIME_KEY] !== runtime) return clearTimers();
+            if (settings.master && settings.autoClick && gamePlayable()) {
+                try { Game.ClickCookie(); } catch (e) { console.warn('[CC Auto] ClickCookie failed', e); }
+            }
+        }, Math.max(10, Math.floor(1000 / clickRate)));
+
+        timers.shimmer = setInterval(() => {
+            if (PageWindow[RUNTIME_KEY] !== runtime) return clearTimers();
+            if (!settings.master || !gamePlayable()) return;
+            clickShimmers();
+            clickFortuneTicker();
+        }, Math.max(100, finite(settings.shimmerIntervalMs, 150)));
+
+        timers.purchase = setInterval(() => {
+            if (PageWindow[RUNTIME_KEY] !== runtime) return clearTimers();
+            if (settings.master && settings.autoBuy && gamePlayable()) smartPurchase();
+        }, Math.max(750, finite(settings.purchaseIntervalMs, 1500)));
+
+        timers.strategy = setInterval(() => {
+            if (PageWindow[RUNTIME_KEY] !== runtime) return clearTimers();
+            if (!settings.master || !gamePlayable()) return;
+            updateStrategyState();
+            manageGrimoire();
+            manageElderPledge();
+            manageWrinklers();
+        }, Math.max(500, finite(settings.strategyIntervalMs, 1000)));
+
+        timers.ui = setInterval(() => {
+            if (PageWindow[RUNTIME_KEY] !== runtime) return clearTimers();
+            updatePanel();
+        }, 500);
+    }
+
+    // =====================================================================
+    // Shimmer / Fortune ticker
+    // =====================================================================
+
+    function clickShimmers() {
+        if (!Array.isArray(Game.shimmers)) return;
+
+        for (const shimmer of Game.shimmers.slice()) {
+            if (!shimmer) continue;
+            try {
+                if (shimmer.type === 'golden') {
+                    const wrath = Boolean(shimmer.wrath);
+                    if (wrath && !settings.wrathCookie) continue;
+                    if (!wrath && !settings.goldenCookie) continue;
+                    shimmer.pop();
+                } else if (shimmer.type === 'reindeer' && settings.reindeer) {
+                    shimmer.pop();
+                }
+            } catch (e) {
+                console.warn('[CC Auto] shimmer click failed', e);
+            }
+        }
+    }
+
+    function clickFortuneTicker() {
+        if (!settings.autoFortuneTicker || !hasUpgrade('Fortune cookies')) return;
+        try {
+            if (!Game.TickerEffect || Game.TickerEffect.type !== 'fortune') return;
+
+            const candidates = [
+                Game.tickerL,
+                document.getElementById('commentsText1'),
+                document.getElementById('commentsText'),
+                document.getElementById('comments')
+            ].filter(Boolean);
+
+            for (const el of candidates) {
+                if (typeof el.click === 'function') {
+                    el.click();
+                    lastActionText = 'Fortuneニュースをクリック';
+                    return;
+                }
+            }
+        } catch (e) {
+            console.warn('[CC Auto] fortune ticker click failed', e);
+        }
+    }
+
+    // =====================================================================
+    // Game helper
+    // =====================================================================
+
+    function hasUpgrade(name) {
+        try {
+            if (typeof Game.Has === 'function') return Boolean(Game.Has(name));
+            return Boolean(Game.Upgrades && Game.Upgrades[name] && Game.Upgrades[name].bought);
+        } catch (_) { return false; }
+    }
+
+    function hasAchiev(name) {
+        try {
+            if (typeof Game.HasAchiev === 'function') return Boolean(Game.HasAchiev(name));
+            return Boolean(Game.Achievements && Game.Achievements[name] && Game.Achievements[name].won);
+        } catch (_) { return false; }
+    }
+
+    function hasBuff(name) {
+        try { return Boolean(Game.hasBuff && Game.hasBuff(name)); } catch (_) { return false; }
+    }
+
+    function auraMult(name) {
+        try { return typeof Game.auraMult === 'function' ? Math.max(0, finite(Game.auraMult(name), 0)) : 0; }
+        catch (_) { return 0; }
+    }
+
+    // v3.1では cookiesPs/unbuffedCps 比をコンボ判定に使っていたため、
+    // 通常倍率を誤って「永久コンボ」と判定し購入停止する可能性があった。
+    // 実際のBuff名だけを見る。購入停止は初期OFF。
+    function isMajorComboActive() {
+        const direct = ['Frenzy', 'Click frenzy', 'Dragonflight', 'Elder frenzy', 'Dragon Harvest'];
+        if (direct.some(hasBuff)) return true;
+
+        try {
+            for (const [name, buff] of Object.entries(Game.buffs || {})) {
+                const n = String(name || (buff && buff.name) || '').toLowerCase();
+                if (n.includes('frenzy') || n.includes('dragonflight') || n.includes('dragon harvest')) return true;
+            }
+        } catch (_) {}
+
+        return false;
+    }
+
+    function clickRateForScoring() {
+        return settings.autoClick ? clamp(finite(settings.clicksPerSecond, 0), 0, 100) : 0;
+    }
+
+    // =====================================================================
+    // Wrinkler economics
+    // =====================================================================
+
+    function activeWrinklers() {
+        if (!Array.isArray(Game.wrinklers)) return [];
+        return Game.wrinklers.filter((w) => w && w.phase > 0 && finite(w.sucked, 0) > 0);
+    }
+
+    function normalWrinklerPopMultiplier() {
+        let mult = 1.1;
+        if (hasUpgrade('Wrinklerspawn')) mult *= 1.05;
+        if (hasUpgrade('Sacrilegious corruption')) mult *= 1.05;
+
+        try {
+            if (typeof Game.hasGod === 'function') {
+                const lvl = finite(Game.hasGod('scorn'), 0);
+                if (lvl === 1) mult *= 1.15;
+                else if (lvl === 2) mult *= 1.10;
+                else if (lvl === 3) mult *= 1.05;
+            }
+        } catch (_) {}
+
+        mult *= 1 + 0.20 * auraMult('Dragon Guts');
+        return mult;
+    }
+
+    function wrinklerPayout(w) {
+        let mult = normalWrinklerPopMultiplier();
+        if (finite(w && w.type, 0) === 1) mult *= 3;
+        return Math.max(0, finite(w && w.sucked, 0) * mult);
+    }
+
+    function totalWrinklerBank(includeShiny = true) {
+        return activeWrinklers()
+            .filter((w) => includeShiny || finite(w.type, 0) !== 1)
+            .reduce((sum, w) => sum + wrinklerPayout(w), 0);
+    }
+
+    function wrinklerEconomicMultiplier() {
+        const list = activeWrinklers();
+        const n = list.length;
+        if (!n) return 1;
+
+        const shiny = list.filter((w) => finite(w.type, 0) === 1).length;
+        const w = clamp(finite(Game.cpsSucked, 0) / n, 0, 1);
+        const m = normalWrinklerPopMultiplier();
+        return Math.max(0, 1 + n * w * (m * (n + 2 * shiny) - 1));
+    }
+
+    // =====================================================================
+    // 収益
+    // =====================================================================
+
+    function liquidPassiveCps() {
+        const sucked = clamp(finite(Game.cpsSucked, 0), 0, 1);
+        return Math.max(0, finite(Game.cookiesPs, 0) * (1 - sucked));
+    }
+
+    function currentMouseCps() {
+        let value = Math.max(0, finite(Game.computedMouseCps, 0));
+        try {
+            if (typeof Game.mouseCps === 'function') value = Math.max(value, finite(Game.mouseCps(), 0));
+        } catch (_) {}
+        return value;
+    }
+
+    function clickIncome() {
+        return Math.max(0, currentMouseCps() * clickRateForScoring());
+    }
+
+    function liquidIncome() {
+        return Math.max(0.001, liquidPassiveCps() + clickIncome());
+    }
+
+    function economicIncome() {
+        const passive = Math.max(0, finite(Game.cookiesPs, 0) * wrinklerEconomicMultiplier());
+        return Math.max(0.001, passive + clickIncome());
+    }
+
+    function incomeSnapshot() {
+        return {
+            liquid: liquidIncome(),
+            economic: economicIncome(),
+            mouse: currentMouseCps()
+        };
+    }
+
+    // =====================================================================
+    // Lucky bank
+    // =====================================================================
+
+    function baseCpsForBank() {
+        return Math.max(0, finite(Game.unbuffedCps, finite(Game.cookiesPs, 0)));
+    }
+
+    function getReserve() {
+        if (!settings.goldenCookie) return 0;
+        const base = baseCpsForBank();
+        const fullLucky = hasUpgrade('Lucky day') && hasUpgrade('Serendipity') && hasUpgrade('Get lucky');
+        if (settings.keepLuckyBank) return base * (fullLucky ? 42000 : 6000);
+        if (!settings.automaticStrategyReserve) return 0;
+        if (strategyState === STRATEGY.COMBO_WAIT) return base * (fullLucky ? 6000 : 1200);
+        if (strategyState === STRATEGY.COMBO_PREP) return base * 300;
+        if (strategyState === STRATEGY.ASCEND_READY) return base * 600;
+        return 0;
+    }
+
+    function spendableCookies() {
+        return Math.max(0, finite(Game.cookies, 0) - getReserve());
+    }
+
+    // =====================================================================
+    // 安全シミュレーション
+    // =====================================================================
+
+    function simulate(changeFn, restoreFn) {
+        const before = incomeSnapshot();
+        const originalWin = Game.Win;
+        const originalUnlock = Game.Unlock;
+        let after = before;
+
+        try {
+            Game.Win = function () {};
+            Game.Unlock = function () {};
+
+            changeFn();
+            if (typeof Game.CalculateGains === 'function') Game.CalculateGains();
+            after = incomeSnapshot();
+        } catch (e) {
+            console.warn('[CC Auto] simulation failed', e);
+        } finally {
+            try {
+                restoreFn();
+                if (typeof Game.CalculateGains === 'function') Game.CalculateGains();
+            } catch (e) {
+                console.warn('[CC Auto] simulation restore failed', e);
+            }
+            Game.Win = originalWin;
+            Game.Unlock = originalUnlock;
+        }
+
+        return {
+            before,
+            after,
+            deltaLiquid: Math.max(0, after.liquid - before.liquid),
+            deltaEconomic: Math.max(0, after.economic - before.economic),
+            deltaMouse: Math.max(0, after.mouse - before.mouse)
+        };
+    }
+
+    function simulateBuildingGain(obj, qty = 1) {
+        const oldAmount = obj.amount;
+        const oldBought = obj.bought;
+        return simulate(
+            () => {
+                obj.amount = oldAmount + qty;
+                if (typeof oldBought === 'number') obj.bought = oldBought + qty;
+            },
+            () => {
+                obj.amount = oldAmount;
+                if (typeof oldBought === 'number') obj.bought = oldBought;
+            }
+        );
+    }
+
+    function simulateUpgradeGain(upgrade) {
+        const oldBought = upgrade.bought;
+        return simulate(
+            () => { upgrade.bought = 1; },
+            () => { upgrade.bought = oldBought; }
+        );
+    }
+
+    function simulateBuildingUpgradePlan(obj, qty, upgrade, achievement = null) {
+        const oldAmount = obj.amount;
+        const oldBought = obj.bought;
+        const oldUpgrade = upgrade ? upgrade.bought : 0;
+        const oldAchWon = achievement ? achievement.won : 0;
+        const oldAchOwned = finite(Game.AchievementsOwned, 0);
+        const oldMilk = finite(Game.milkProgress, 0);
+        const countAchievement = achievement && !achievement.won && (!achievement.pool || achievement.pool === 'normal');
+
+        return simulate(
+            () => {
+                obj.amount = oldAmount + qty;
+                if (typeof oldBought === 'number') obj.bought = oldBought + qty;
+                if (achievement) {
+                    achievement.won = 1;
+                    if (countAchievement) {
+                        Game.AchievementsOwned = oldAchOwned + 1;
+                        Game.milkProgress = Game.AchievementsOwned / 25;
+                    }
+                }
+                if (upgrade) upgrade.bought = 1;
+            },
+            () => {
+                obj.amount = oldAmount;
+                if (typeof oldBought === 'number') obj.bought = oldBought;
+                if (achievement) achievement.won = oldAchWon;
+                if (upgrade) upgrade.bought = oldUpgrade;
+                Game.AchievementsOwned = oldAchOwned;
+                Game.milkProgress = oldMilk;
+            }
+        );
+    }
+
+    function simulateSynergyPlan(b1, q1, b2, q2, upgrade) {
+        const s1 = { amount: b1.amount, bought: b1.bought };
+        const s2 = { amount: b2.amount, bought: b2.bought };
+        const oldUpgrade = upgrade.bought;
+
+        return simulate(
+            () => {
+                b1.amount = s1.amount + q1;
+                b2.amount = s2.amount + q2;
+                if (typeof s1.bought === 'number') b1.bought = s1.bought + q1;
+                if (typeof s2.bought === 'number') b2.bought = s2.bought + q2;
+                upgrade.bought = 1;
+            },
+            () => {
+                b1.amount = s1.amount;
+                b2.amount = s2.amount;
+                if (typeof s1.bought === 'number') b1.bought = s1.bought;
+                if (typeof s2.bought === 'number') b2.bought = s2.bought;
+                upgrade.bought = oldUpgrade;
+            }
+        );
+    }
+
+    // =====================================================================
+    // Price helpers
+    // =====================================================================
+
+    function getSingleBuildingPrice(obj) {
+        const oldMode = Game.buyMode;
+        const oldBulk = Game.buyBulk;
+        try {
+            Game.buyMode = 1;
+            Game.buyBulk = 1;
+            return finite(obj.getPrice(), Infinity);
+        } catch (_) {
+            return Infinity;
+        } finally {
+            Game.buyMode = oldMode;
+            Game.buyBulk = oldBulk;
+        }
+    }
+
+    function estimateBuildingBundleCost(obj, qty) {
+        if (qty <= 0) return 0;
+
+        try {
+            if (typeof obj.getSumPrice === 'function') {
+                const oldMode = Game.buyMode;
+                const oldBulk = Game.buyBulk;
+                try {
+                    Game.buyMode = 1;
+                    Game.buyBulk = 1;
+                    const sum = finite(obj.getSumPrice(qty), Infinity);
+                    if (Number.isFinite(sum) && sum > 0) return sum;
+                } finally {
+                    Game.buyMode = oldMode;
+                    Game.buyBulk = oldBulk;
+                }
+            }
+        } catch (_) {}
+
+        const oldAmount = obj.amount;
+        const oldBought = obj.bought;
+        let total = 0;
+        try {
+            for (let i = 0; i < qty; i++) {
+                const p = getSingleBuildingPrice(obj);
+                if (!Number.isFinite(p) || p <= 0) return Infinity;
+                total += p;
+                obj.amount++;
+                if (typeof obj.bought === 'number') obj.bought++;
+            }
+        } catch (_) {
+            total = Infinity;
+        } finally {
+            obj.amount = oldAmount;
+            if (typeof oldBought === 'number') obj.bought = oldBought;
+        }
+        return total;
+    }
+
+    function upgradePrice(upgrade) {
+        try {
+            const p = finite(typeof upgrade.getPrice === 'function' ? upgrade.getPrice() : upgrade.basePrice, Infinity);
+            return p > 0 ? p : Infinity;
+        } catch (_) {
+            return Infinity;
+        }
+    }
+
+    // =====================================================================
+    // Fallback gain - simulation failure must never stop all purchases
+    // =====================================================================
+
+    function fallbackBuildingGain(obj) {
+        try {
+            const global = Math.max(0.000001, finite(Game.globalCpsMult, 1));
+            let per = finite(obj.storedCps, 0);
+            if (per <= 0 && typeof obj.cps === 'function') per = finite(obj.cps(obj), 0);
+            if (per <= 0 && finite(obj.amount, 0) > 0) per = finite(obj.storedTotalCps, 0) / finite(obj.amount, 1);
+            return Math.max(0.000001, per * global);
+        } catch (_) {
+            return 0.000001;
+        }
+    }
+
+    // =====================================================================
+    // Golden Cookie strategic value
+    // =====================================================================
+
+    function estimateGoldenCookieEcps(virtualOwned = new Set()) {
+        if (!settings.goldenCookie) return 0;
+
+        const owns = (name) => virtualOwned.has(String(name).toLowerCase()) || hasUpgrade(name);
+        let spawnFactor = 1;
+        if (owns('Lucky day')) spawnFactor *= 0.5;
+        if (owns('Serendipity')) spawnFactor *= 0.5;
+        if (owns('Golden goose egg')) spawnFactor *= 0.95;
+        if (owns('Green yeast digestives')) spawnFactor *= 0.99;
+        if (hasUpgrade('Heavenly luck')) spawnFactor *= 0.95;
+
+        const averageInterval = Math.max(15, 600 * spawnFactor);
+        let duration = 1;
+        if (owns('Get lucky')) duration *= 2;
+        if (owns('Green yeast digestives')) duration *= 1.01;
+        if (hasUpgrade('Lasting fortune')) duration *= 1.1;
+
+        const passive = Math.max(0, finite(Game.unbuffedCps, finite(Game.cookiesPs, 0)));
+        const clicks = Math.max(0, currentMouseCps() * clickRateForScoring());
+        const bank = Math.max(0, finite(Game.cookies, 0));
+
+        const frenzy = 0.40 * passive * 6 * 77 * duration;
+        const lucky = 0.40 * (Math.min(bank * 0.15, passive * 900) + 13);
+        const clickFrenzy = 0.03 * clicks * 776 * 13 * duration;
+
+        let ecps = (frenzy + lucky + clickFrenzy) / averageInterval;
+        if (owns('Lucky day') && owns('Serendipity') && owns('Get lucky')) ecps *= 1.15;
+        return Math.max(0, ecps);
+    }
+
+    function strategicPseudoDelta(upgrade) {
+        const key = String(upgrade.name || '').toLowerCase();
+        const info = STRATEGIC_UPGRADES[key];
+        if (!info) return { delta: 0, reason: '', critical: false };
+
+        const income = economicIncome();
+        let delta = 0;
+
+        if (info.kind === 'gc') {
+            const before = estimateGoldenCookieEcps();
+            const after = estimateGoldenCookieEcps(new Set([key]));
+            delta = Math.max(0, after - before);
+            if (key === 'lucky day' || key === 'serendipity') delta = Math.max(delta, income * 0.18);
+            if (key === 'get lucky') delta = Math.max(delta, income * 0.30);
+        } else if (info.kind === 'discount') {
+            delta = income * 0.012;
+        } else if (info.kind === 'research') {
+            delta = settings.buyResearch ? income * 0.08 : 0;
+        }
+
+        return { delta, reason: info.label, critical: Boolean(info.critical) };
+    }
+
+    // =====================================================================
+    // Candidate scoring
+    // =====================================================================
+
+    function makeScore(cost, deltaEconomic, bank = spendableCookies(), income = liquidIncome()) {
+        if (!Number.isFinite(cost) || cost <= 0 || !Number.isFinite(deltaEconomic) || deltaEconomic <= 0) return Infinity;
+        const wait = Math.max(cost - bank, 0) / Math.max(income, 0.001);
+        const repay = cost / deltaEconomic;
+        return wait + repay;
+    }
+
+    function candidateBase(data) {
+        return {
+            type: 'unknown',
+            target: null,
+            targetUpgrade: null,
+            name: '',
+            price: Infinity,
+            immediatePrice: Infinity,
+            deltaLiquid: 0,
+            deltaEconomic: 0,
+            score: Infinity,
+            waitSeconds: Infinity,
+            repaySeconds: Infinity,
+            affordable: false,
+            critical: false,
+            reason: '',
+            source: 'normal',
+            ...data
+        };
+    }
+
+    // 単発ROIだけでは、KittenやGolden Cookie系など長く効くUpgradeを過小評価する。
+    // 同じ時間だけ何も買わなかった場合と購入した場合の将来資産差を3期間で比較する。
+    function applyMultiHorizonScore(candidate) {
+        if (!settings.efficiencyMode || !candidate || !Number.isFinite(candidate.score)) return candidate;
+
+        const income = planningIncome();
+        const bank = spendableCookies();
+        const cost = Math.max(0, finite(candidate.immediatePrice, Infinity));
+        if (!Number.isFinite(cost)) return candidate;
+
+        const delta = Math.max(0, candidateImmediateDelta(candidate)) +
+            Math.max(0, candidateComboRate(candidate)) * strategyWeights().combo;
+        const wait = Math.max(cost - bank, 0) / income;
+        const horizons = [
+            [Math.max(1, finite(settings.horizonShortSeconds, 60)), 0.50],
+            [Math.max(1, finite(settings.horizonMediumSeconds, 300)), 0.35],
+            [Math.max(1, finite(settings.horizonLongSeconds, 900)), 0.15]
+        ];
+
+        let valueSeconds = 0;
+        for (const [seconds, horizonWeight] of horizons) {
+            if (wait >= seconds) continue;
+            const directWealth = bank + income * seconds;
+            const bankAtPurchase = Math.max(0, bank + income * wait - cost);
+            const purchaseWealth = bankAtPurchase + (income + delta) * (seconds - wait);
+            valueSeconds += horizonWeight * ((purchaseWealth - directWealth) / income);
+        }
+
+        // 加算でScoreを0へ潰すと有力候補がすべて同順位になるため、相対倍率へ変換する。
+        const weight = clamp(finite(settings.horizonValueWeight, 0.45), 0, 2);
+        const relativeValue = valueSeconds / Math.max(candidate.score, 1);
+        const adjustment = Math.min(4, Math.abs(relativeValue) * weight);
+        const score = relativeValue >= 0
+            ? candidate.score / (1 + adjustment)
+            : candidate.score * (1 + adjustment);
+        return { ...candidate, baseScore: candidate.score, score, horizonValueSeconds: valueSeconds };
+    }
+
+    function applyMultiHorizonScoring(list) {
+        return (list || []).map(applyMultiHorizonScore).sort((a, b) => a.score - b.score);
+    }
+
+    // =====================================================================
+    // Target ETA acceleration
+    // =====================================================================
+
+    function isBuildingPurchaseCandidate(candidate) {
+        if (!candidate) return false;
+        return new Set([
+            'building', 'tierPlan', 'synergyPlan', 'achievementPlan',
+            'researchPlan', 'fallbackBuilding'
+        ]).has(candidate.type);
+    }
+
+    function isUpgradePurchaseCandidate(candidate) {
+        if (!candidate || !candidate.target) return false;
+        if (isBuildingPurchaseCandidate(candidate)) return false;
+        return 'bought' in candidate.target && typeof candidate.target.buy === 'function';
+    }
+
+    // 高価なUpgradeへ到達するまでの時間には、通常CpSだけでなく
+    // 自動取得するGolden Cookieの長期期待収益も保守的に加える。
+    function planningIncome() {
+        let value = liquidIncome();
+        try {
+            if (settings.goldenCookie) value += Math.max(0, estimateGoldenCookieEcps());
+        } catch (_) {}
+        return Math.max(0.001, value);
+    }
+
+    // 候補Aを「1回だけ購入した状態」を仮想的に作り、fnを評価して必ず元へ戻す。
+    // 実際のbuy()は呼ばないため、Cookieや実績を消費しない。
+    function withCandidateOneStep(candidate, fn) {
+        if (!candidate || !candidate.target || typeof fn !== 'function') return null;
+
+        const target = candidate.target;
+        const building = isBuildingPurchaseCandidate(candidate);
+        const upgrade = isUpgradePurchaseCandidate(candidate);
+        if (!building && !upgrade) return null;
+
+        const originalWin = Game.Win;
+        const originalUnlock = Game.Unlock;
+        const oldAmount = building ? target.amount : undefined;
+        const oldBought = target.bought;
+        const oldCookies = finite(Game.cookies, 0);
+        const simulatedCost = Math.max(0, finite(candidate.immediatePrice, 0));
+
+        try {
+            Game.Win = function () {};
+            Game.Unlock = function () {};
+
+            // 実際にAを買えば銀行残高も減る。Lucky期待値などの計画収益にも反映する。
+            Game.cookies = Math.max(0, oldCookies - simulatedCost);
+
+            if (building) {
+                target.amount = finite(oldAmount, 0) + 1;
+                if (typeof oldBought === 'number') target.bought = oldBought + 1;
+            } else {
+                target.bought = 1;
+            }
+
+            if (typeof Game.CalculateGains === 'function') Game.CalculateGains();
+            return fn();
+        } catch (e) {
+            console.warn('[CC Auto] Target ETA candidate simulation failed', candidate.name, e);
+            return null;
+        } finally {
+            try {
+                Game.cookies = oldCookies;
+                if (building) {
+                    target.amount = oldAmount;
+                    target.bought = oldBought;
+                } else {
+                    target.bought = oldBought;
+                }
+                if (typeof Game.CalculateGains === 'function') Game.CalculateGains();
+            } catch (e) {
+                console.warn('[CC Auto] Target ETA restore failed', candidate.name, e);
+            }
+            Game.Win = originalWin;
+            Game.Unlock = originalUnlock;
+        }
+    }
+
+    // Target ETAで追う対象は「現在ストアに出ているが、まだ高くて買えないUpgrade」。
+    // 未出現Upgradeは価格や到達条件が変動しやすいため、ここでは解禁プランナーへ任せる。
+    function getTargetEtaTargets(current) {
+        if (!settings.targetEtaEnabled) return [];
+
+        const minDirect = Math.max(0, finite(settings.targetEtaMinDirectSeconds, 15));
+        const maxTargets = Math.max(1, Math.floor(finite(settings.targetEtaMaxTargets, 8)));
+        const bank = spendableCookies();
+        const income = planningIncome();
+
+        return current
+            .filter((c) => c && isUpgradePurchaseCandidate(c) && !canAfford(c))
+            .map((c) => {
+                const price = upgradePrice(c.target);
+                const directEta = Math.max(price - bank, 0) / income;
+                return { ...c, etaTargetPrice: price, etaDirectSeconds: directEta };
+            })
+            .filter((c) => Number.isFinite(c.etaTargetPrice) && c.etaTargetPrice > bank && c.etaDirectSeconds >= minDirect)
+            .sort((a, b) => {
+                if (Boolean(a.critical) !== Boolean(b.critical)) return a.critical ? -1 : 1;
+                return a.score - b.score;
+            })
+            .slice(0, maxTargets);
+    }
+
+    function evaluateTargetEtaForCandidate(candidate, targets) {
+        if (!settings.targetEtaEnabled || !candidate || !canAfford(candidate) || !targets.length) return null;
+
+        const bank = spendableCookies();
+        const directIncome = planningIncome();
+        const candidateCost = finite(candidate.immediatePrice, Infinity);
+        if (!Number.isFinite(candidateCost) || candidateCost > bank) return null;
+
+        let best = null;
+
+        for (const target of targets) {
+            if (!target || !target.target || target.target === candidate.target) continue;
+
+            const directPrice = upgradePrice(target.target);
+            if (!Number.isFinite(directPrice)) continue;
+
+            const directEta = Math.max(directPrice - bank, 0) / directIncome;
+            if (!(directEta > 0)) continue;
+
+            const via = withCandidateOneStep(candidate, () => {
+                const bankAfter = Math.max(0, bank - candidateCost);
+                // Discount Upgrade等を先に買った場合は、目標Upgrade価格もここで再取得する。
+                const targetPriceAfter = upgradePrice(target.target);
+                const incomeAfter = planningIncome();
+                if (!Number.isFinite(targetPriceAfter) || !(incomeAfter > 0)) return null;
+                return {
+                    targetPriceAfter,
+                    incomeAfter,
+                    eta: Math.max(targetPriceAfter - bankAfter, 0) / incomeAfter
+                };
+            });
+
+            if (!via || !Number.isFinite(via.eta)) continue;
+
+            const saved = directEta - via.eta;
+            const minSaving = Math.max(0, finite(settings.targetEtaMinSavingSeconds, 2));
+            if (saved < minSaving) continue;
+
+            const ratio = clamp(saved / Math.max(directEta, 0.001), 0, 1);
+            const result = {
+                targetName: target.name,
+                directEta,
+                viaEta: via.eta,
+                savedSeconds: saved,
+                savedRatio: ratio,
+                directTargetPrice: directPrice,
+                viaTargetPrice: via.targetPriceAfter,
+                targetCritical: Boolean(target.critical)
+            };
+
+            if (!best || result.savedRatio > best.savedRatio ||
+                (result.savedRatio === best.savedRatio && result.savedSeconds > best.savedSeconds)) {
+                best = result;
+            }
+        }
+
+        return best;
+    }
+
+    function getChainEtaTargets(future) {
+        if (!settings.chainEtaEnabled) return [];
+        const bank = spendableCookies();
+        const income = planningIncome();
+        const maxTargets = Math.max(1, Math.floor(finite(settings.chainEtaMaxTargets, 6)));
+        return (future || [])
+            .filter((c) => c && c.targetUpgrade && Number.isFinite(c.price) && c.price > bank)
+            .map((c) => ({ ...c, chainDirectSeconds: Math.max(c.price - bank, 0) / income }))
+            .filter((c) => Number.isFinite(c.chainDirectSeconds) && c.chainDirectSeconds > 0)
+            .sort((a, b) => a.score - b.score)
+            .slice(0, maxTargets);
+    }
+
+    function evaluateChainEtaForCandidate(candidate, targets) {
+        if (!settings.chainEtaEnabled || !candidate || !canAfford(candidate) || !targets.length) return null;
+        const bank = spendableCookies();
+        const directIncome = planningIncome();
+        const candidateCost = finite(candidate.immediatePrice, Infinity);
+        if (!Number.isFinite(candidateCost) || candidateCost > bank) return null;
+
+        let best = null;
+        for (const target of targets) {
+            if (!target || !Number.isFinite(target.price)) continue;
+            const directEta = Math.max(target.price - bank, 0) / directIncome;
+            if (!(directEta > 0)) continue;
+
+            const via = withCandidateOneStep(candidate, () => {
+                const bankAfter = Math.max(0, bank - candidateCost);
+                const sameUnlockStep = target.target && candidate.target === target.target;
+                const finalUpgradePrice = target.targetUpgrade ? upgradePrice(target.targetUpgrade) : 0;
+                const remainingChainCost = sameUnlockStep
+                    ? Math.max(finalUpgradePrice, target.price - candidateCost)
+                    : target.price;
+                const incomeAfter = planningIncome();
+                return {
+                    eta: Math.max(remainingChainCost - bankAfter, 0) / Math.max(incomeAfter, 0.001),
+                    remainingChainCost
+                };
+            });
+            if (!via || !Number.isFinite(via.eta)) continue;
+
+            const saved = directEta - via.eta;
+            if (saved < Math.max(0, finite(settings.targetEtaMinSavingSeconds, 2))) continue;
+            const result = {
+                targetName: target.targetUpgrade ? target.targetUpgrade.name : target.name,
+                directEta,
+                viaEta: via.eta,
+                savedSeconds: saved,
+                savedRatio: clamp(saved / Math.max(directEta, 0.001), 0, 1),
+                remainingChainCost: via.remainingChainCost
+            };
+            if (!best || result.savedRatio > best.savedRatio ||
+                (result.savedRatio === best.savedRatio && result.savedSeconds > best.savedSeconds)) best = result;
+        }
+        return best;
+    }
+
+    function applyTargetEtaScoring(affordable, current, future = []) {
+        if ((!settings.targetEtaEnabled && !settings.chainEtaEnabled) || !affordable.length) {
+            purchaseDiag.etaTargetsEvaluated = 0;
+            return affordable.slice().sort((a, b) => a.score - b.score);
+        }
+
+        const targets = getTargetEtaTargets(current);
+        const chainTargets = getChainEtaTargets(future);
+        purchaseDiag.etaTargetsEvaluated = targets.length + chainTargets.length;
+        if (!targets.length && !chainTargets.length) return affordable.slice().sort((a, b) => a.score - b.score);
+
+        const weight = clamp(finite(settings.targetEtaWeight, 0.70), 0, 1);
+        const chainWeight = clamp(finite(settings.chainEtaWeight, 0.65), 0, 1);
+
+        const rescored = affordable.map((candidate) => {
+            const eta = evaluateTargetEtaForCandidate(candidate, targets);
+            const chainEta = evaluateChainEtaForCandidate(candidate, chainTargets);
+            if (!eta && !chainEta) return { ...candidate, baseScore: candidate.score };
+
+            const visibleBonus = eta ? eta.savedRatio * weight * (eta.targetCritical ? 1.15 : 1) : 0;
+            const chainBonus = chainEta ? chainEta.savedRatio * chainWeight : 0;
+            const selected = visibleBonus >= chainBonus ? eta : chainEta;
+            const etaKind = visibleBonus >= chainBonus ? 'Target ETA' : 'Chain ETA';
+            const bonusFraction = clamp(Math.max(visibleBonus, chainBonus), 0, 0.80);
+            const baseScore = candidate.score;
+            const adjustedScore = Number.isFinite(baseScore)
+                ? baseScore * (1 - bonusFraction)
+                : baseScore;
+
+            return {
+                ...candidate,
+                baseScore,
+                score: adjustedScore,
+                etaKind,
+                etaTargetName: selected.targetName,
+                etaDirectSeconds: selected.directEta,
+                etaViaSeconds: selected.viaEta,
+                etaSavedSeconds: selected.savedSeconds,
+                etaSavedRatio: selected.savedRatio,
+                etaBonusFraction: bonusFraction,
+                etaDirectTargetPrice: selected.directTargetPrice,
+                etaViaTargetPrice: selected.viaTargetPrice,
+                reason: `${candidate.reason} / ${etaKind}: ${selected.targetName}への到達を約${formatSeconds(selected.savedSeconds)}短縮`
+            };
+        });
+
+        return rescored.sort((a, b) => a.score - b.score);
+    }
+
+    // =====================================================================
+    // Current purchasable candidates
+    // =====================================================================
+
+    function getBuildingCandidates() {
+        if (!settings.buyBuildings) return [];
+        const out = [];
+        const bank = spendableCookies();
+        const income = liquidIncome();
+
+        for (const obj of Game.ObjectsById || []) {
+            if (!obj || typeof obj.getPrice !== 'function' || typeof obj.buy !== 'function') continue;
+            if ('unlocked' in obj && obj.unlocked === 0) continue;
+
+            const price = getSingleBuildingPrice(obj);
+            if (!Number.isFinite(price) || price <= 0) continue;
+
+            const sim = simulateBuildingGain(obj, 1);
+            const delta = sim.deltaEconomic > 0 ? sim.deltaEconomic : fallbackBuildingGain(obj);
+
+            out.push(candidateBase({
+                type: 'building',
+                target: obj,
+                name: obj.name,
+                price,
+                immediatePrice: price,
+                deltaLiquid: sim.deltaLiquid,
+                deltaEconomic: delta,
+                score: makeScore(price, delta, bank, income),
+                waitSeconds: Math.max(price - bank, 0) / income,
+                repaySeconds: price / Math.max(delta, 0.000001),
+                affordable: price <= bank,
+                reason: sim.deltaEconomic > 0 ? '施設1個の実測PP' : '施設1個のフォールバックPP',
+                source: sim.deltaEconomic > 0 ? 'simulation' : 'fallback'
+            }));
+        }
+
+        return out;
+    }
+
+    function upgradeAllowed(upgrade) {
+        if (!upgrade || upgrade.bought) return false;
+        const name = String(upgrade.name || '').toLowerCase();
+        if (NEVER_AUTO_BUY.has(name)) return false;
+
+        const pool = String(upgrade.pool || '');
+        if (pool === 'prestige' || pool === 'debug' || pool === 'toggle') return false;
+        if (pool === 'tech' && !settings.buyResearch) return false;
+        return true;
+    }
+
+    function availableStoreUpgrades() {
+        const seen = new Set();
+        const out = [];
+
+        const primary = Array.isArray(Game.UpgradesInStore) ? Game.UpgradesInStore : [];
+        const fallback = Array.isArray(Game.UpgradesById) ? Game.UpgradesById.filter((u) => u && u.unlocked && !u.bought) : [];
+
+        for (const up of [...primary, ...fallback]) {
+            if (!up || seen.has(up.id)) continue;
+            seen.add(up.id);
+            if (!upgradeAllowed(up)) continue;
+            if ('unlocked' in up && !up.unlocked) continue;
+            out.push(up);
+        }
+        return out;
+    }
+
+    function buildingEconomicContribution(obj) {
+        if (!obj) return 0;
+        const storedTotal = Math.max(0, finite(obj.storedTotalCps, 0));
+        if (storedTotal > 0) return storedTotal * wrinklerEconomicMultiplier();
+        const amount = Math.max(0, finite(obj.amount, 0));
+        const storedEach = Math.max(0, finite(obj.storedCps, 0));
+        if (storedEach > 0 && amount > 0) return storedEach * amount * Math.max(0.000001, finite(Game.globalCpsMult, 1)) * wrinklerEconomicMultiplier();
+        try {
+            if (amount > 0 && typeof obj.cps === 'function') {
+                return Math.max(0, finite(obj.cps(obj), 0) * amount * Math.max(0.000001, finite(Game.globalCpsMult, 1)) * wrinklerEconomicMultiplier());
+            }
+        } catch (_) {}
+        return 0;
+    }
+
+    function numericUpgradePower(upgrade) {
+        try {
+            const raw = typeof upgrade.power === 'function' ? upgrade.power(upgrade) : upgrade.power;
+            return Math.max(0, finite(raw, 0));
+        } catch (_) { return 0; }
+    }
+
+    function descriptionEffectMultiplier(desc, power = 0) {
+        if (/twice as (?:efficient|powerful|effective)|production is doubled|double(?:s|d)?/.test(desc)) return 2;
+        if (/(?:効率|生産力|生産量|クリック)[^。.!]{0,20}2\s*倍|2\s*倍[^。.!]{0,20}(?:効率|生産|クリック)|倍になる/.test(desc)) return 2;
+        const times = desc.match(/(?:are|is|become)\s+(\d+(?:\.\d+)?)\s+times\s+(?:as\s+)?(?:efficient|powerful|effective)/);
+        if (times) return Math.max(1, finite(times[1], 1));
+        const percent = desc.match(/(?:production|cookies per second|cps)[^\d+]*\+\s*(\d+(?:\.\d+)?)%/);
+        if (percent) return 1 + finite(percent[1], 0) / 100;
+        if (power > 1 && power <= 1000) return power;
+        return 1;
+    }
+
+    // Upgradeを「名前だけの固定割合」ではなく、現在の建物構成・クリック速度・説明・power属性で評価する。
+    function estimateUpgradeEffect(upgrade) {
+        const name = String(upgrade && upgrade.name || '').toLowerCase();
+        const desc = `${String(upgrade && upgrade.desc || '')} ${String(upgrade && upgrade.ddesc || '')}`
+            .toLowerCase().replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ');
+        const income = Math.max(economicIncome(), 0.001);
+        const passive = Math.max(0, finite(Game.cookiesPs, 0) * wrinklerEconomicMultiplier());
+        const clicks = Math.max(0, clickIncome());
+        const power = numericUpgradePower(upgrade);
+        const knownClickMultiplier = EARLY_CLICK_MULTIPLIER_UPGRADES.has(name) ? 2 : 1;
+        // 通常の施設Tier Upgradeは内部tier/buildingTieを持つ。表示言語や翻訳欠けに依存せず2倍と判定する。
+        const metadataBuildingMultiplier = upgrade && upgrade.buildingTie &&
+            upgrade.tier !== undefined && upgrade.tier !== null ? 2 : 1;
+        const knownBuildingMultiplier = name === 'child labor' ? 2 : 1;
+        const multiplier = Math.max(descriptionEffectMultiplier(desc, power), knownClickMultiplier,
+            metadataBuildingMultiplier, knownBuildingMultiplier);
+        const reasons = [];
+        let delta = 0;
+        let priority = false;
+        let critical = false;
+        let confidence = 0.25;
+
+        const tied = upgrade && upgrade.buildingTie;
+        if (tied) {
+            const contribution = buildingEconomicContribution(tied);
+            if (contribution > 0 && multiplier > 1) {
+                delta += contribution * (multiplier - 1);
+                reasons.push(`${tied.name || '施設'}の実生産×${multiplier.toFixed(2)}`);
+                priority = true;
+                confidence = Math.max(confidence, 0.85);
+            }
+        }
+
+        if (upgrade && (upgrade.buildingTie1 || upgrade.buildingTie2)) {
+            const contribution = buildingEconomicContribution(upgrade.buildingTie1) + buildingEconomicContribution(upgrade.buildingTie2);
+            const synergyDelta = contribution > 0 ? contribution * Math.max(0.05, multiplier - 1) : income * 0.08;
+            delta += synergyDelta;
+            reasons.push('Synergy対象施設の現在生産');
+            priority = true;
+            confidence = Math.max(confidence, 0.65);
+        }
+
+        const tiedName = String(tied && tied.name || '').toLowerCase();
+        const affectsClicks = knownClickMultiplier > 1 || tiedName === 'cursor' ||
+            /mouse|click|finger|マウス|クリック|カーソル/.test(name + ' ' + desc);
+        if (affectsClicks) {
+            let clickDelta = 0;
+            if (multiplier > 1) clickDelta = clicks * (multiplier - 1);
+            const flatClick = desc.match(/mouse[^.]*gains?\s*\+?\s*(\d+(?:\.\d+)?)\s+cookies?\s+per\s+click/);
+            if (flatClick) clickDelta = Math.max(clickDelta, finite(flatClick[1], 0) * clickRateForScoring());
+            if (!(clickDelta > 0)) clickDelta = Math.max(clicks * 0.25, income * 0.03);
+            delta += clickDelta;
+            reasons.push('現在の自動クリック収益');
+            priority = true;
+            if (knownClickMultiplier > 1) critical = true;
+            confidence = Math.max(confidence, multiplier > 1 ? 0.90 : 0.60);
+        }
+
+        const globalPercent = desc.match(/cookie production multiplier[^\d+]*\+\s*(\d+(?:\.\d+)?)%/);
+        if (globalPercent) {
+            delta += passive * finite(globalPercent[1], 0) / 100;
+            reasons.push(`全体生産+${globalPercent[1]}%`);
+            priority = true;
+            confidence = Math.max(confidence, 0.85);
+        } else if (String(upgrade && upgrade.pool || '') === 'cookie' && power > 0) {
+            delta += passive * power / 100;
+            reasons.push(`Cookie Upgrade +${power}%`);
+            priority = true;
+            confidence = Math.max(confidence, 0.80);
+        }
+
+        if (name.includes('kitten')) {
+            delta = Math.max(delta, income * Math.max(0.14, finite(Game.milkProgress, 0) * 0.10));
+            reasons.push('Milk連動の全体乗算');
+            priority = true;
+            critical = true;
+            confidence = Math.max(confidence, 0.70);
+        }
+        if (/lucky day|serendipity|get lucky|golden|fortune/.test(name)) {
+            delta = Math.max(delta, income * 0.09);
+            reasons.push('Golden Cookie期待収益');
+            priority = true;
+            critical = true;
+            confidence = Math.max(confidence, 0.65);
+        }
+        if (String(upgrade && upgrade.pool || '') === 'tech' || /research/.test(name)) {
+            delta = Math.max(delta, income * 0.05);
+            reasons.push('Research解禁連鎖');
+            priority = true;
+            confidence = Math.max(confidence, 0.55);
+        }
+
+        const discount = desc.match(/(?:buildings?|upgrades?|everything)[^.]*?(\d+(?:\.\d+)?)%\s+cheaper/);
+        if (discount) {
+            const fraction = clamp(finite(discount[1], 0) / 100, 0, 0.95);
+            // 継続的に再投資する資金の購買力上昇を等価収益へ換算する。
+            delta = Math.max(delta, income * (fraction / Math.max(0.05, 1 - fraction)) * 0.75);
+            reasons.push(`再投資価格-${discount[1]}%`);
+            priority = true;
+            confidence = Math.max(confidence, 0.65);
+        }
+
+        if (!(delta > 0) && settings.buyUtility) {
+            delta = income * 0.002;
+            reasons.push('未定量Upgradeの候補維持値');
+        }
+
+        return {
+            delta: Math.max(0, delta),
+            priority,
+            critical,
+            confidence,
+            reason: reasons.join('＋') || 'Upgrade効果推定',
+            buildingMultiplierUpgrade: Boolean(tied && multiplier > 1),
+            linkedBuilding: tied || null
+        };
+    }
+
+    function getUpgradeCandidates() {
+        if (!settings.buyUpgrades) return [];
+        const out = [];
+        const bank = spendableCookies();
+        const income = liquidIncome();
+
+        for (const upgrade of availableStoreUpgrades()) {
+            const price = upgradePrice(upgrade);
+            if (!Number.isFinite(price) || price <= 0) continue;
+
+            const sim = simulateUpgradeGain(upgrade);
+            const strategic = strategicPseudoDelta(upgrade);
+            const effect = settings.effectAwareUpgradeValuation ? estimateUpgradeEffect(upgrade) : { delta: 0, priority: false, critical: false, confidence: 0, reason: '' };
+            let delta = Math.max(sim.deltaEconomic, strategic.delta, effect.delta);
+            let reason = sim.deltaEconomic >= Math.max(strategic.delta, effect.delta)
+                ? 'Upgradeの実測PP'
+                : (strategic.delta >= effect.delta ? strategic.reason : effect.reason);
+            let type = Math.max(strategic.delta, effect.delta) > sim.deltaEconomic ? 'strategic' : 'upgrade';
+
+            if (delta > 0) {
+                const priority = strategic.critical || effect.priority;
+                const multiplier = priority
+                    ? finite(settings.strategicUpgradeMultiplier, 0.60)
+                    : finite(settings.upgradePriorityMultiplier, 0.72);
+                let score = makeScore(price, delta, bank, income) * clamp(multiplier, 0.35, 1.2);
+                if (strategic.critical || effect.critical) score *= 0.82;
+                // Upgradeは一度買えば価格上昇なしで永久に効く。施設の反復購入と比較するため小さく補正する。
+                score *= clamp(finite(settings.permanentUpgradeBonus, 0.90), 0.70, 1.10);
+
+                out.push(candidateBase({
+                    type,
+                    target: upgrade,
+                    name: upgrade.name,
+                    price,
+                    immediatePrice: price,
+                    deltaLiquid: Math.max(sim.deltaLiquid, effect.delta),
+                    deltaEconomic: delta,
+                    score,
+                    waitSeconds: Math.max(price - bank, 0) / income,
+                    repaySeconds: price / delta,
+                    affordable: price <= bank,
+                    reason: reason || '戦略Upgrade',
+                    critical: strategic.critical || effect.critical,
+                    upgradePriority: priority,
+                    upgradeValueConfidence: sim.deltaEconomic > 0 ? 1 : effect.confidence,
+                    upgradeValueModel: sim.deltaEconomic >= Math.max(strategic.delta, effect.delta) ? 'simulation' : (strategic.delta >= effect.delta ? 'strategic' : 'effect-aware'),
+                    buildingMultiplierUpgrade: effect.buildingMultiplierUpgrade,
+                    linkedBuilding: effect.linkedBuilding,
+                    source: 'store'
+                }));
+                continue;
+            }
+        }
+
+        return out;
+    }
+
+    // =====================================================================
+    // Upgrade unlock planners - purchase-driven conditions
+    // =====================================================================
+
+    function getTierChainCandidates() {
+        if (!settings.unlockPlanner || !settings.futureAware || !settings.tierLookahead || !settings.buyBuildings || !settings.buyUpgrades) return [];
+        const out = [];
+        const bank = spendableCookies();
+        const income = liquidIncome();
+        const maxUnits = Math.max(1, finite(settings.lookaheadMaxUnits, 80));
+
+        for (const obj of Game.ObjectsById || []) {
+            if (!obj || !obj.tieredUpgrades || ('unlocked' in obj && obj.unlocked === 0)) continue;
+            const current = finite(obj.amount, 0);
+
+            const future = Object.values(obj.tieredUpgrades)
+                .filter((u) => u && !u.bought && Game.Tiers && Game.Tiers[u.tier])
+                .map((u) => ({ upgrade: u, threshold: finite(Game.Tiers[u.tier].unlock, 0) }))
+                .filter((x) => x.threshold > current)
+                .sort((a, b) => a.threshold - b.threshold)[0];
+
+            if (!future) continue;
+            const qty = future.threshold - current;
+            if (qty <= 0 || qty > maxUnits) continue;
+
+            const buildingCost = estimateBuildingBundleCost(obj, qty);
+            const upPrice = upgradePrice(future.upgrade);
+            const planCost = buildingCost + upPrice;
+            if (!Number.isFinite(planCost)) continue;
+
+            const sim = simulateBuildingUpgradePlan(obj, qty, future.upgrade);
+            if (sim.deltaEconomic <= 0) continue;
+
+            const immediatePrice = getSingleBuildingPrice(obj);
+            out.push(candidateBase({
+                type: 'tierPlan',
+                target: obj,
+                targetUpgrade: future.upgrade,
+                name: `${obj.name} ${future.threshold}個 → ${future.upgrade.name}`,
+                price: planCost,
+                immediatePrice,
+                deltaLiquid: sim.deltaLiquid,
+                deltaEconomic: sim.deltaEconomic,
+                score: makeScore(planCost, sim.deltaEconomic, bank, income),
+                waitSeconds: Math.max(immediatePrice - bank, 0) / income,
+                repaySeconds: planCost / sim.deltaEconomic,
+                affordable: immediatePrice <= bank,
+                reason: '施設数で出現するTier Upgradeを先読み',
+                source: 'unlock-tier'
+            }));
+        }
+
+        return out;
+    }
+
+    function getSynergyCandidates() {
+        if (!settings.unlockPlanner || !settings.futureAware || !settings.synergyLookahead || !settings.buyBuildings || !settings.buyUpgrades) return [];
+        const out = [];
+        const bank = spendableCookies();
+        const income = liquidIncome();
+        const maxUnits = Math.max(1, finite(settings.lookaheadMaxUnits, 80));
+
+        for (const up of Game.UpgradesById || []) {
+            if (!up || up.bought || !up.buildingTie1 || !up.buildingTie2 || !Game.Tiers || !Game.Tiers[up.tier]) continue;
+            const tier = Game.Tiers[up.tier];
+            if (!tier.special) continue;
+            if (tier.require && !hasUpgrade(tier.require)) continue;
+
+            const b1 = up.buildingTie1;
+            const b2 = up.buildingTie2;
+            const threshold = finite(tier.unlock, 0);
+            const q1 = Math.max(0, threshold - finite(b1.amount, 0));
+            const q2 = Math.max(0, threshold - finite(b2.amount, 0));
+            if (q1 + q2 <= 0 || q1 + q2 > maxUnits) continue;
+
+            const planCost = estimateBuildingBundleCost(b1, q1) + estimateBuildingBundleCost(b2, q2) + upgradePrice(up);
+            if (!Number.isFinite(planCost)) continue;
+
+            const sim = simulateSynergyPlan(b1, q1, b2, q2, up);
+            if (sim.deltaEconomic <= 0) continue;
+
+            const steps = [];
+            if (q1 > 0) steps.push({ obj: b1, price: getSingleBuildingPrice(b1) });
+            if (q2 > 0) steps.push({ obj: b2, price: getSingleBuildingPrice(b2) });
+            steps.sort((a, b) => a.price - b.price);
+            if (!steps.length) continue;
+
+            const step = steps[0];
+            out.push(candidateBase({
+                type: 'synergyPlan',
+                target: step.obj,
+                targetUpgrade: up,
+                name: `${up.name} 解禁 (${b1.name}/${b2.name})`,
+                price: planCost,
+                immediatePrice: step.price,
+                deltaLiquid: sim.deltaLiquid,
+                deltaEconomic: sim.deltaEconomic,
+                score: makeScore(planCost, sim.deltaEconomic, bank, income),
+                waitSeconds: Math.max(step.price - bank, 0) / income,
+                repaySeconds: planCost / sim.deltaEconomic,
+                affordable: step.price <= bank,
+                reason: 'Synergy Upgradeの施設数条件を先読み',
+                source: 'unlock-synergy'
+            }));
+        }
+
+        return out;
+    }
+
+    function getNextKitten() {
+        const owned = finite(Game.AchievementsOwned, 0);
+        for (const [name, achievements] of KITTEN_UNLOCKS) {
+            const up = Game.Upgrades && Game.Upgrades[name];
+            if (!up || up.bought) continue;
+            if (owned < achievements) return { name, achievements, upgrade: up };
+            if (!up.unlocked) return { name, achievements, upgrade: up };
+        }
+        return null;
+    }
+
+    function getAchievementMilestoneCandidates() {
+        if (!settings.unlockPlanner || !settings.futureAware || !settings.achievementLookahead || !settings.buyBuildings) return [];
+        const out = [];
+        const bank = spendableCookies();
+        const income = liquidIncome();
+        const maxUnits = Math.max(1, finite(settings.lookaheadMaxUnits, 80));
+        const nextKitten = getNextKitten();
+
+        for (const obj of Game.ObjectsById || []) {
+            if (!obj || !obj.tieredAchievs || ('unlocked' in obj && obj.unlocked === 0)) continue;
+            const current = finite(obj.amount, 0);
+
+            const next = Object.values(obj.tieredAchievs)
+                .filter((a) => a && !a.won && Game.Tiers && Game.Tiers[a.tier])
+                .map((a) => ({ achievement: a, threshold: finite(Game.Tiers[a.tier].achievUnlock, 0) }))
+                .filter((x) => x.threshold > current)
+                .sort((a, b) => a.threshold - b.threshold)[0];
+
+            if (!next) continue;
+            const qty = next.threshold - current;
+            if (qty <= 0 || qty > maxUnits) continue;
+
+            const buildingCost = estimateBuildingBundleCost(obj, qty);
+            if (!Number.isFinite(buildingCost)) continue;
+
+            let targetUpgrade = null;
+            let extraCost = 0;
+            let reason = '建物実績→Milk強化を先読み';
+
+            const afterAchievements = finite(Game.AchievementsOwned, 0) + 1;
+            if (nextKitten && afterAchievements >= nextKitten.achievements && settings.buyUpgrades) {
+                targetUpgrade = nextKitten.upgrade;
+                extraCost = upgradePrice(targetUpgrade);
+                reason = `実績で${nextKitten.name}の出現条件に到達`;
+            }
+
+            const sim = simulateBuildingUpgradePlan(obj, qty, targetUpgrade, next.achievement);
+            const simple = simulateBuildingGain(obj, qty);
+
+            // Kitten解禁、またはMilk上昇による追加価値がある場合のみ未来候補化。
+            if (!targetUpgrade && sim.deltaEconomic <= simple.deltaEconomic * 1.001) continue;
+            if (sim.deltaEconomic <= 0) continue;
+
+            const planCost = buildingCost + extraCost;
+            const immediatePrice = getSingleBuildingPrice(obj);
+            out.push(candidateBase({
+                type: 'achievementPlan',
+                target: obj,
+                targetUpgrade,
+                name: `${obj.name} ${next.threshold}個 → 実績「${next.achievement.name}」${targetUpgrade ? ` → ${targetUpgrade.name}` : ''}`,
+                price: planCost,
+                immediatePrice,
+                deltaLiquid: sim.deltaLiquid,
+                deltaEconomic: sim.deltaEconomic,
+                score: makeScore(planCost, sim.deltaEconomic, bank, income),
+                waitSeconds: Math.max(immediatePrice - bank, 0) / income,
+                repaySeconds: planCost / sim.deltaEconomic,
+                affordable: immediatePrice <= bank,
+                reason,
+                source: 'unlock-achievement'
+            }));
+        }
+
+        return out;
+    }
+
+    function getResearchUnlockCandidate() {
+        if (!settings.unlockPlanner || !settings.futureAware || !settings.researchLookahead || !settings.buyResearch || !settings.buyBuildings || !settings.buyUpgrades) return [];
+
+        const bingo = Game.Upgrades && Game.Upgrades['Bingo center/Research facility'];
+        if (!bingo || bingo.bought || bingo.unlocked) return [];
+
+        const out = [];
+        const bank = spendableCookies();
+        const income = liquidIncome();
+
+        // Bingo center自体はElder実績 + Grandma 6以上。
+        // Elder実績はGrandma typeを7種購入すると得られるため、未達なら最も安い未購入Grandma typeを進める。
+        if (!hasAchiev('Elder')) {
+            const names = Array.isArray(Game.GrandmaSynergies) ? Game.GrandmaSynergies : [];
+            const plans = [];
+
+            for (const name of names) {
+                const up = Game.Upgrades && Game.Upgrades[name];
+                if (!up || up.bought || !up.buildingTie) continue;
+
+                const linked = up.buildingTie;
+                const grandma = Game.Objects && Game.Objects['Grandma'];
+                if (!grandma) continue;
+
+                const qLinked = Math.max(0, 15 - finite(linked.amount, 0));
+                const qGrandma = Math.max(0, 1 - finite(grandma.amount, 0));
+                const units = qLinked + qGrandma;
+                if (units <= 0) continue;
+
+                const cLinked = estimateBuildingBundleCost(linked, qLinked);
+                const cGrandma = estimateBuildingBundleCost(grandma, qGrandma);
+                const planCost = cLinked + cGrandma + upgradePrice(up);
+                if (!Number.isFinite(planCost)) continue;
+
+                let nextObj = null;
+                if (qGrandma > 0) nextObj = grandma;
+                else if (qLinked > 0) nextObj = linked;
+                if (!nextObj) continue;
+
+                const nextPrice = getSingleBuildingPrice(nextObj);
+                // 研究解禁の戦略価値を保守的に置く。実際のUpgradeは出現後に通常評価される。
+                const delta = Math.max(economicIncome() * 0.03, fallbackBuildingGain(nextObj));
+                plans.push(candidateBase({
+                    type: 'researchPlan',
+                    target: nextObj,
+                    targetUpgrade: up,
+                    name: `Elder実績へ：${up.name} 解禁`,
+                    price: planCost,
+                    immediatePrice: nextPrice,
+                    deltaEconomic: delta,
+                    score: makeScore(planCost, delta, bank, income) * 1.20,
+                    waitSeconds: Math.max(nextPrice - bank, 0) / income,
+                    repaySeconds: planCost / delta,
+                    affordable: nextPrice <= bank,
+                    reason: 'Bingo center出現条件（Elder実績）のためGrandma typeを増やす',
+                    source: 'unlock-research'
+                }));
+            }
+
+            plans.sort((a, b) => a.price - b.price);
+            if (plans[0]) out.push(plans[0]);
+            return out;
+        }
+
+        const grandma = Game.Objects && Game.Objects['Grandma'];
+        if (grandma && finite(grandma.amount, 0) < 6) {
+            const price = getSingleBuildingPrice(grandma);
+            const delta = Math.max(economicIncome() * 0.03, fallbackBuildingGain(grandma));
+            out.push(candidateBase({
+                type: 'researchPlan',
+                target: grandma,
+                name: 'Bingo center出現へ：Grandma 6個',
+                price: estimateBuildingBundleCost(grandma, 6 - finite(grandma.amount, 0)) + upgradePrice(bingo),
+                immediatePrice: price,
+                deltaEconomic: delta,
+                score: makeScore(price, delta, bank, income),
+                waitSeconds: Math.max(price - bank, 0) / income,
+                repaySeconds: price / delta,
+                affordable: price <= bank,
+                reason: 'Bingo center/Research facilityのGrandma数条件',
+                source: 'unlock-research'
+            }));
+        }
+
+        return out;
+    }
+
+    // =====================================================================
+    // Unlock goals - passive/random conditions are tracked, not forced
+    // =====================================================================
+
+    function getMouseUnlockGoal() {
+        const handmade = finite(Game.handmadeCookies, 0);
+        for (const [name, threshold] of MOUSE_UNLOCKS) {
+            const up = Game.Upgrades && Game.Upgrades[name];
+            if (!up || up.bought || up.unlocked) continue;
+            return {
+                category: 'Mouse',
+                name,
+                current: handmade,
+                target: threshold,
+                text: `${name}: 手焼き ${pretty(handmade)} / ${pretty(threshold)}`
+            };
+        }
+        return null;
+    }
+
+    function getKittenUnlockGoal() {
+        const owned = finite(Game.AchievementsOwned, 0);
+        const next = getNextKitten();
+        if (!next) return null;
+        return {
+            category: 'Kitten',
+            name: next.name,
+            current: owned,
+            target: next.achievements,
+            text: `${next.name}: 実績 ${owned} / ${next.achievements}`
+        };
+    }
+
+    function getGoldenUnlockGoal() {
+        const total = finite(Game.goldenClicks, 0);
+        const local = finite(Game.goldenClicksLocal, 0);
+        for (const [name, threshold] of GOLDEN_UNLOCKS) {
+            const up = Game.Upgrades && Game.Upgrades[name];
+            if (!up || up.bought || up.unlocked) continue;
+            const localNote = local <= 0 && total >= threshold ? '（この周回でGCを1回クリックすると判定対象）' : '';
+            return {
+                category: 'Golden',
+                name,
+                current: total,
+                target: threshold,
+                text: `${name}: GCクリック ${total} / ${threshold}${localNote}`
+            };
+        }
+        return null;
+    }
+
+    function getCookieBakedUnlockGoal() {
+        if (!Array.isArray(Game.UnlockAt)) return null;
+        const baked = finite(Game.cookiesEarned, 0);
+        const items = [];
+
+        for (const entry of Game.UnlockAt) {
+            if (!entry || !entry.name || !Number.isFinite(Number(entry.cookies))) continue;
+            const up = Game.Upgrades && Game.Upgrades[entry.name];
+            if (!up || up.bought || up.unlocked) continue;
+            if (entry.require && !hasUpgrade(entry.require)) continue;
+            if (entry.season && Game.season !== entry.season) continue;
+            const target = finite(entry.cookies, Infinity);
+            if (target <= baked) continue;
+            items.push({ name: entry.name, target });
+        }
+
+        items.sort((a, b) => a.target - b.target);
+        if (!items[0]) return null;
+        return {
+            category: 'Baked',
+            name: items[0].name,
+            current: baked,
+            target: items[0].target,
+            text: `${items[0].name}: この周回の総生産 ${pretty(baked)} / ${pretty(items[0].target)}`
+        };
+    }
+
+    function getResearchGoal() {
+        if (!settings.buyResearch) return null;
+        const bingo = Game.Upgrades && Game.Upgrades['Bingo center/Research facility'];
+        if (!bingo) return null;
+
+        if (!bingo.bought) {
+            if (!hasAchiev('Elder')) {
+                const types = (Game.GrandmaSynergies || []).filter((name) => hasUpgrade(name)).length;
+                return {
+                    category: 'Research',
+                    name: 'Bingo center/Research facility',
+                    text: `Bingo center: Elder実績未達（Grandma type購入 ${types} / 7 が目安）`
+                };
+            }
+            const grandma = Game.Objects && Game.Objects['Grandma'];
+            if (grandma && finite(grandma.amount, 0) < 6) {
+                return {
+                    category: 'Research',
+                    name: 'Bingo center/Research facility',
+                    text: `Bingo center: Grandma ${finite(grandma.amount, 0)} / 6`
+                };
+            }
+            return { category: 'Research', name: 'Bingo center/Research facility', text: 'Bingo center: 出現待ち/購入待ち' };
+        }
+
+        if (finite(Game.researchT, -1) > 0) {
+            return {
+                category: 'Research',
+                name: 'Research',
+                text: `Research進行中：残り約${formatSeconds(finite(Game.researchT, 0) / Math.max(finite(Game.fps, 30), 1))}`
+            };
+        }
+
+        return null;
+    }
+
+    function getFortuneGoal() {
+        if (!hasUpgrade('Fortune cookies')) return null;
+        const fortunes = Game.Tiers && Game.Tiers.fortune && Array.isArray(Game.Tiers.fortune.upgrades)
+            ? Game.Tiers.fortune.upgrades
+            : [];
+        const remaining = fortunes.filter((u) => u && !u.bought).length;
+        if (!remaining) return null;
+        return {
+            category: 'Fortune',
+            name: 'Fortune cookies',
+            text: `Fortuneニュース由来Upgrade：残り ${remaining}（自動更新ニュースを監視）`
+        };
+    }
+
+    function getSeasonGoal() {
+        if (!Game.season) return null;
+        let remaining = 0;
+        for (const up of Game.UpgradesById || []) {
+            if (!up || up.bought) continue;
+            if (up.season && up.season === Game.season) remaining++;
+        }
+        if (!remaining) return null;
+        return {
+            category: 'Season',
+            name: Game.season,
+            text: `${Game.season}季節Upgrade：未取得候補 ${remaining}（ランダムドロップ/季節固有条件）`
+        };
+    }
+
+    function buildUnlockGoals() {
+        if (!settings.unlockPlanner) return [];
+        return [
+            getMouseUnlockGoal(),
+            getKittenUnlockGoal(),
+            getGoldenUnlockGoal(),
+            getCookieBakedUnlockGoal(),
+            getResearchGoal(),
+            getFortuneGoal(),
+            getSeasonGoal()
+        ].filter(Boolean);
+    }
+
+    // =====================================================================
+    // Purchase engine v8.5 - locale-independent Upgrade reservation planning
+    // =====================================================================
+
+    function getFutureCandidates() {
+        if (!settings.unlockPlanner || !settings.futureAware) return [];
+        try {
+            return applyMultiHorizonScoring([
+                ...getTierChainCandidates(),
+                ...getSynergyCandidates(),
+                ...getAchievementMilestoneCandidates(),
+                ...getResearchUnlockCandidate()
+            ].filter((x) => x && Number.isFinite(x.score) && Number.isFinite(x.immediatePrice)));
+        } catch (e) {
+            console.warn('[CC Auto] future candidate generation failed; ignored', e);
+            return [];
+        }
+    }
+
+    function getCurrentCandidates() {
+        const out = [];
+        try { out.push(...getBuildingCandidates()); }
+        catch (e) { console.warn('[CC Auto] building candidate generation failed', e); }
+        try { out.push(...getUpgradeCandidates()); }
+        catch (e) { console.warn('[CC Auto] upgrade candidate generation failed', e); }
+
+        return applyMultiHorizonScoring(out
+            .filter((x) => x && Number.isFinite(x.immediatePrice) && x.immediatePrice > 0));
+    }
+
+    // 高度なシミュレーションが壊れても、ゲーム内部に今存在する施設・Upgradeを直接列挙する。
+    // これは「解析のフォールバック」であり、自動購入エンジンから独立している。
+    function getGuaranteedFallbackCandidates() {
+        const bank = spendableCookies();
+        const income = Math.max(liquidIncome(), 0.001);
+        const items = [];
+
+        if (settings.buyUpgrades) {
+            try {
+                for (const up of availableStoreUpgrades()) {
+                    if (!up || up.bought) continue;
+                    const price = upgradePrice(up);
+                    if (!Number.isFinite(price) || price <= 0) continue;
+
+                    // Upgradeは効果推定に失敗しても、ストアに出ている事実を優先。
+                    // 安いUpgradeを完全に無視しないよう、費用/現在収益で有限スコアを与える。
+                    items.push(candidateBase({
+                        type: 'fallbackUpgrade',
+                        target: up,
+                        name: up.name,
+                        price,
+                        immediatePrice: price,
+                        score: price / income,
+                        waitSeconds: Math.max(price - bank, 0) / income,
+                        affordable: price <= bank,
+                        reason: '保証Fallback：現在ストアにあるUpgrade',
+                        source: 'guaranteed-fallback'
+                    }));
+                }
+            } catch (e) {
+                console.warn('[CC Auto] fallback upgrades failed', e);
+            }
+        }
+
+        if (settings.buyBuildings) {
+            try {
+                for (const obj of Game.ObjectsById || []) {
+                    if (!obj || typeof obj.buy !== 'function') continue;
+                    if ('unlocked' in obj && obj.unlocked === 0) continue;
+
+                    const price = getSingleBuildingPrice(obj);
+                    if (!Number.isFinite(price) || price <= 0) continue;
+                    const gain = Math.max(fallbackBuildingGain(obj), 0.000001);
+
+                    items.push(candidateBase({
+                        type: 'fallbackBuilding',
+                        target: obj,
+                        name: obj.name,
+                        price,
+                        immediatePrice: price,
+                        deltaEconomic: gain,
+                        score: price / gain,
+                        waitSeconds: Math.max(price - bank, 0) / income,
+                        affordable: price <= bank,
+                        reason: '保証Fallback：現在購入可能な施設',
+                        source: 'guaranteed-fallback'
+                    }));
+                }
+            } catch (e) {
+                console.warn('[CC Auto] fallback buildings failed', e);
+            }
+        }
+
+        return items.sort((a, b) => a.score - b.score);
+    }
+
+    function candidateKey(c) {
+        if (!c) return 'null';
+        const id = c.target && (c.target.id !== undefined ? c.target.id : c.target.name);
+        // 同じ実物を通常候補とFallback候補の両方で二重評価しない。
+        // currentを先に渡しているため、通常評価が存在すればそちらを残す。
+        const kind = isBuildingPurchaseCandidate(c) ? 'building' : 'upgrade';
+        return `${kind}:${id}`;
+    }
+
+    function uniqueCandidates(list) {
+        const seen = new Set();
+        const out = [];
+        for (const c of list) {
+            if (!c) continue;
+            const key = candidateKey(c);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(c);
+        }
+        return out;
+    }
+
+    // 同じ実物でも「通常生産」と「解禁連鎖」では評価理由が異なるため、計画用途ではsourceも保持する。
+    function uniquePlannerCandidates(list) {
+        const seen = new Set();
+        const out = [];
+        for (const candidate of list || []) {
+            if (!candidate) continue;
+            const key = plannerCandidateKey(candidate);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(candidate);
+        }
+        return out;
+    }
+
+    function canAfford(candidate) {
+        return Boolean(candidate) && spendableCookies() + 1e-9 >= finite(candidate.immediatePrice, Infinity);
+    }
+
+    function getAffordableImmediateSet(current, fallbacks) {
+        // 通常候補を優先しつつ、通常解析から漏れた候補も必ず含める。
+        return uniqueCandidates([
+            ...current.filter(canAfford),
+            ...fallbacks.filter(canAfford)
+        ]).sort((a, b) => a.score - b.score);
+    }
+
+    function chooseAffordableFutureStep(future, bestImmediate) {
+        if (!settings.futureAware || !bestImmediate) return null;
+        const advantage = clamp(finite(settings.futureStepAdvantage, 0.65), 0.20, 0.95);
+
+        const candidate = future
+            .filter((c) => canAfford(c))
+            .sort((a, b) => a.score - b.score)[0];
+
+        if (!candidate) return null;
+        // 未来計画は「今買える次の施設」が非常に有利なときだけ購入先を誘導する。
+        // 買えない未来候補のために待つことはしない。
+        return candidate.score <= bestImmediate.score * advantage ? candidate : null;
+    }
+
+    // 序盤の既知の支配的手順。
+    // Reinforced index fingerはCursor 1個で解禁され、クリックとCursorを同時に2倍にする。
+    // 自動クリック中にCursorを価格100へ達するまで積むより、1個だけ買ってUpgradeを待つ。
+    function getOpeningBookDecision(current, fallbacks) {
+        if (!settings.openingBookEnabled || !settings.autoClick || !settings.buyBuildings || !settings.buyUpgrades) return null;
+        const cursor = Game.Objects && Game.Objects.Cursor;
+        if (!cursor) return null;
+
+        const visible = uniqueCandidates([...(current || []), ...(fallbacks || [])]);
+        const cursorCandidate = visible.find((candidate) => candidate.target === cursor) || null;
+
+        if (finite(cursor.amount, 0) < 1) {
+            openingWaitGuard = { cycles: 0, startedAt: 0 };
+            if (!cursorCandidate) return null;
+            return {
+                mode: canAfford(cursorCandidate) ? 'buy' : 'wait',
+                candidate: cursorCandidate,
+                openingPriority: true,
+                reason: 'クリック基盤：最初のCursorを1個だけ取得'
+            };
+        }
+
+        // 最初の3つは通常の施設Upgradeと異なり、Cursorだけでなくクリック単価も2倍にする。
+        // 表示名・翻訳・説明解析を使わず、ゲームの安定したUpgrade IDで順序を確定する。
+        const foundations = [
+            { id: 0, minCursors: 1 },
+            { id: 1, minCursors: 1 },
+            { id: 2, minCursors: 10 }
+        ];
+        const next = foundations.find((item) => {
+            const up = Game.UpgradesById && Game.UpgradesById[item.id];
+            return up && !up.bought && finite(cursor.amount, 0) >= item.minCursors && up.unlocked;
+        });
+        if (!next) {
+            openingWaitGuard = { cycles: 0, startedAt: 0 };
+            return null;
+        }
+
+        const upgrade = Game.UpgradesById[next.id];
+        let upgradeCandidate = visible.find((candidate) => candidate.target === upgrade ||
+            finite(candidate.target && candidate.target.id, -1) === next.id);
+        if (!upgradeCandidate) {
+            const price = upgradePrice(upgrade);
+            if (!Number.isFinite(price)) return null;
+            const tied = Math.max(0, buildingEconomicContribution(cursor));
+            const delta = Math.max(clickIncome() + tied, economicIncome(), 0.001);
+            upgradeCandidate = candidateBase({
+                type: 'strategic',
+                target: upgrade,
+                name: upgrade.name,
+                price,
+                immediatePrice: price,
+                deltaLiquid: delta,
+                deltaEconomic: delta,
+                score: 0.001,
+                waitSeconds: Math.max(price - spendableCookies(), 0) / planningIncome(),
+                affordable: price <= spendableCookies(),
+                critical: true,
+                upgradePriority: true,
+                reason: `クリック基盤：Upgrade ID ${next.id}でクリックとCursorを同時に2倍`,
+                source: 'click-foundation'
+            });
+        }
+
+        const ready = canAfford(upgradeCandidate);
+        return {
+            mode: ready ? 'buy' : 'wait',
+            candidate: upgradeCandidate,
+            openingPriority: true,
+            exclusiveAttempt: ready,
+            reason: ready
+                ? `クリック基盤を購入：${upgrade.name}`
+                : `クリック基盤を優先：Cursor追加を止めて${upgrade.name}まで直接貯蓄`
+        };
+    }
+
+    function isCriticalWaitTarget(candidate) {
+        if (!candidate) return false;
+        const name = String(candidate.name || '').toLowerCase();
+        const efficientUpgrade = isUpgradeLike(candidate) && Boolean(candidate.upgradePriority) &&
+            finite(candidate.repaySeconds, Infinity) <= Math.max(900, finite(settings.horizonLongSeconds, 900) * 2);
+        return Boolean(candidate.critical || efficientUpgrade || candidate.targetUpgrade || candidate.type === 'researchPlan' ||
+            /kitten|lucky day|serendipity|get lucky|golden|research|bingo center|grimoire/.test(name));
+    }
+
+    function adaptiveWaitLimit(candidate) {
+        return isCriticalWaitTarget(candidate)
+            ? Math.max(0, finite(settings.criticalWaitMaxSeconds, 150))
+            : Math.max(0, finite(settings.normalWaitMaxSeconds, 45));
+    }
+
+    // 直接貯める経路と、現在候補を1個買ってから貯める経路を同じ仮想状態で比較する。
+    function evaluateAdaptiveWaitTarget(target, bestImmediate) {
+        if (!target || !bestImmediate || canAfford(target)) return null;
+        if (!(isUpgradeLike(target) || target.critical || target.targetUpgrade)) return null;
+
+        // ETAが短くても目標自体の価値が低ければ待たない。
+        const tolerance = clamp(finite(settings.waitTargetScoreTolerance, 1.25), 0.5, 5);
+        const targetIsStrategic = isCriticalWaitTarget(target) || Boolean(target.upgradePriority);
+        if (!targetIsStrategic && strategyAdjustedCandidateScore(target) > strategyAdjustedCandidateScore(bestImmediate) * tolerance) return null;
+
+        const bank = spendableCookies();
+        const income = planningIncome();
+        const currentTargetPrice = virtualCandidatePrice(target);
+        if (!Number.isFinite(currentTargetPrice)) return null;
+
+        const directEta = Math.max(currentTargetPrice - bank, 0) / income;
+        const waitLimit = adaptiveWaitLimit(target);
+        if (!(directEta > 0) || directEta > waitLimit) return null;
+
+        const via = withCandidateOneStep(bestImmediate, () => {
+            const targetPriceAfter = virtualCandidatePrice(target);
+            const bankAfter = spendableCookies();
+            const incomeAfter = planningIncome();
+            if (!Number.isFinite(targetPriceAfter) || !(incomeAfter > 0)) return null;
+            return {
+                eta: Math.max(targetPriceAfter - bankAfter, 0) / incomeAfter,
+                targetPriceAfter,
+                incomeAfter
+            };
+        });
+        if (!via || !Number.isFinite(via.eta)) return null;
+
+        const savedSeconds = via.eta - directEta;
+        const savedRatio = savedSeconds / Math.max(via.eta, 0.001);
+        // 1回の安い施設購入による遅延が3秒未満でも、毎周期繰り返すとUpgrade取得が大幅に遅れる。
+        // 長期純増加資産で明確に勝つUpgradeには、小さい1手遅延から直接貯蓄を開始する。
+        const targetNetValue = candidateWeightedNetValue(target);
+        const immediateNetValue = candidateWeightedNetValue(bestImmediate);
+        const dominantUpgrade = isUpgradeLike(target) && Boolean(target.upgradePriority) && targetNetValue > 0 &&
+            targetNetValue >= Math.max(0, immediateNetValue) * 1.05;
+        const minSeconds = dominantUpgrade
+            ? Math.max(0.000001, finite(settings.dominantUpgradeWaitMinSeconds, 0.001))
+            : Math.max(0, finite(settings.waitMinEtaSavingSeconds, 3));
+        const minRatio = dominantUpgrade
+            ? clamp(finite(settings.dominantUpgradeWaitMinRatio, 0.000001), 0, 0.25)
+            : clamp(finite(settings.waitMinEtaSavingRatio, 0.10), 0, 0.95);
+        if (savedSeconds < minSeconds || savedRatio < minRatio) return null;
+
+        return { target, directEta, viaEta: via.eta, savedSeconds, savedRatio, waitLimit, dominantUpgrade, targetNetValue, immediateNetValue };
+    }
+
+    // ETA比較で直接貯蓄が明確に速い場合だけ待つ。周期数と実時間の両方で必ず打ち切る。
+    function chooseBoundedStrategicWait(current, future, bestImmediate) {
+        if (!settings.efficiencyMode || !settings.boundedStrategicWait || !bestImmediate) return null;
+        const bank = spendableCookies();
+        const income = planningIncome();
+
+        const evaluated = uniquePlannerCandidates([...(current || []), ...(future || [])])
+            .map((target) => evaluateAdaptiveWaitTarget(target, bestImmediate))
+            .filter(Boolean)
+            .sort((a, b) => Number(b.dominantUpgrade) - Number(a.dominantUpgrade) ||
+                b.savedRatio - a.savedRatio || b.savedSeconds - a.savedSeconds || a.directEta - b.directEta)[0];
+
+        if (!evaluated) return null;
+        const target = evaluated.target;
+        const key = plannerCandidateKey(target);
+        // 対象が途中で変わっても待機枠全体の時間と周期数は引き継ぐ。
+        // 候補を交互に切り替えて上限を回避することはできない。
+        if (!boundedWaitGuard.startedAt) boundedWaitGuard = { key, cycles: 0, startedAt: Date.now() };
+        else boundedWaitGuard.key = key;
+
+        const intervalSeconds = Math.max(0.75, finite(settings.purchaseIntervalMs, 1500) / 1000);
+        const timeBasedCycles = Math.max(1, Math.ceil(evaluated.waitLimit / intervalSeconds));
+        const maxCycles = Math.min(
+            Math.max(1, Math.floor(finite(settings.boundedWaitMaxCycles, 100))),
+            timeBasedCycles
+        );
+        if (boundedWaitGuard.cycles >= maxCycles || Date.now() - boundedWaitGuard.startedAt > evaluated.waitLimit * 1000) return null;
+        boundedWaitGuard.cycles++;
+
+        const wait = waitPlannerAction(Math.max(1, Math.ceil(evaluated.directEta)), bank, income, target);
+        wait.boundedWait = true;
+        wait.waitTarget = target;
+        wait.waitLimitSeconds = evaluated.waitLimit;
+        wait.waitMaxCycles = maxCycles;
+        wait.etaDirectSeconds = evaluated.directEta;
+        wait.etaViaSeconds = evaluated.viaEta;
+        wait.etaSavedSeconds = evaluated.savedSeconds;
+        wait.etaSavedRatio = evaluated.savedRatio;
+        wait.dominantUpgrade = evaluated.dominantUpgrade;
+        return wait;
+    }
+
+    function adaptiveWaitReason(wait) {
+        const prefix = wait.dominantUpgrade ? '長期価値が高いUpgradeを優先 / ' : '';
+        return `${prefix}直接貯蓄が約${formatSeconds(finite(wait.etaSavedSeconds, 0))}（${(finite(wait.etaSavedRatio, 0) * 100).toFixed(1)}%）短縮 / ` +
+            `待機${boundedWaitGuard.cycles}/${Math.max(1, finite(wait.waitMaxCycles, 1))}周期）`;
+    }
+
+    function chooseSavingsTarget(current, fallbacks) {
+        // 何も買えない場合だけ貯蓄する。
+        // 未出現Upgradeではなく、まず現在ストア/施設として実在する対象を選ぶ。
+        const visible = uniqueCandidates([...current, ...fallbacks])
+            .filter((c) => c && Number.isFinite(c.waitSeconds))
+            .sort((a, b) => {
+                if (Boolean(a.critical) !== Boolean(b.critical)) return a.critical ? -1 : 1;
+                return a.score - b.score;
+            });
+        return visible[0] || null;
+    }
+
+    // =====================================================================
+    // 2～3手 dynamic-state Beam Search purchase planner - v8.5
+    // =====================================================================
+
+    function plannerCandidateKey(candidate) {
+        return `${candidateKey(candidate)}:${candidate.source || candidate.type || 'normal'}`;
+    }
+
+    function candidateUnlockSeconds(candidate) {
+        if (!candidate) return 0;
+        let seconds = 0;
+        if (candidate.critical) seconds += 150;
+        if (candidate.targetUpgrade) seconds += 100;
+        if (String(candidate.source || '').startsWith('unlock-')) seconds += 120;
+        if (candidate.type === 'strategic' || candidate.type === 'researchPlan') seconds += 75;
+        return seconds * clamp(finite(settings.unlockChainWeight, 0.85), 0, 2);
+    }
+
+    function candidateComboRate(candidate) {
+        if (!candidate) return 0;
+        const name = String(candidate.name || '').toLowerCase();
+        const immediateDelta = candidateImmediateDelta(candidate);
+        let rate = immediateDelta * 0.08;
+        if (/mouse|finger|click|kitten/.test(name)) rate += immediateDelta * 0.45;
+        if (/golden|lucky|serendipity|dragon|godzamok/.test(name) || candidate.critical) {
+            rate += Math.max(planningIncome() * 0.015, immediateDelta * 0.30);
+        }
+        // 低寄与施設はGodzamokの売却燃料として少量の準備価値を持つ。
+        if (candidate.type === 'building' && /farm|mine|factory|shipment/.test(name)) rate += planningIncome() * 0.002;
+        return rate * clamp(finite(settings.comboValueWeight, 0.70), 0, 2);
+    }
+
+    function candidateImmediateDelta(candidate) {
+        if (!candidate) return 0;
+        if (String(candidate.source || '').startsWith('unlock-') && candidate.target) {
+            return Math.max(0, fallbackBuildingGain(candidate.target));
+        }
+        return Math.max(0, finite(candidate.deltaEconomic, 0));
+    }
+
+    function strategyAdjustedCandidateScore(candidate) {
+        const weights = strategyWeights();
+        const base = Number.isFinite(candidate.score) ? candidate.score : 1e99;
+        const unlockDiscount = 1 + (candidateUnlockSeconds(candidate) / 300) * weights.unlock;
+        const comboDiscount = 1 + (candidateComboRate(candidate) / Math.max(planningIncome(), 0.001)) * weights.combo * 4;
+        return base / Math.max(0.1, weights.production * unlockDiscount * comboDiscount);
+    }
+
+    function isUpgradeLike(candidate) {
+        return Boolean(candidate) && !isBuildingPurchaseCandidate(candidate) &&
+            candidate.type !== 'waitAction' && Boolean(candidate.target) &&
+            ('bought' in candidate.target || /upgrade|strategic|utility/i.test(String(candidate.type || '')));
+    }
+
+    // 価格の近さではなく、購入後に各期間で増えるCookieから費用を引いた純増加資産を比べる。
+    // 安い施設を順に買い続けて恒久Upgradeを遅らせる局所最適を防ぐ。
+    function candidateWeightedNetValue(candidate) {
+        if (!candidate) return -Infinity;
+        const cost = Math.max(0, finite(candidate.immediatePrice, Infinity));
+        if (!Number.isFinite(cost)) return -Infinity;
+        const income = Math.max(planningIncome(), 0.001);
+        const bank = spendableCookies();
+        const wait = Math.max(cost - bank, 0) / income;
+        const delta = Math.max(0, candidateImmediateDelta(candidate)) +
+            Math.max(0, candidateComboRate(candidate)) * strategyWeights().combo;
+        const horizons = [
+            [Math.max(1, finite(settings.horizonShortSeconds, 60)), 0.20],
+            [Math.max(1, finite(settings.horizonMediumSeconds, 300)), 0.35],
+            [Math.max(1, finite(settings.horizonLongSeconds, 900)), 0.45]
+        ];
+        let value = 0;
+        for (const [seconds, weight] of horizons) {
+            if (wait >= seconds) {
+                value -= cost * weight;
+                continue;
+            }
+            value += (delta * (seconds - wait) - cost) * weight;
+        }
+        value += candidateUnlockSeconds(candidate) * income * strategyWeights().unlock;
+        return value;
+    }
+
+    // 目標まで直接貯蓄する経路と、今買える候補を1個買ってから貯蓄する全経路を比較する。
+    // 目標ETAを実際に短縮する投資だけをコミットメント中に許可する。
+    function chooseCommitmentAcceleration(target, affordable) {
+        if (!target || canAfford(target)) return null;
+        const bank = spendableCookies();
+        const income = Math.max(planningIncome(), 0.001);
+        const targetPrice = virtualCandidatePrice(target);
+        if (!Number.isFinite(targetPrice)) return null;
+        const directEta = Math.max(targetPrice - bank, 0) / income;
+        let best = null;
+
+        for (const action of (affordable || []).slice(0, 16)) {
+            if (!action || action.target === target.target || !canAfford(action)) continue;
+            const via = withCandidateOneStep(action, () => {
+                const priceAfter = virtualCandidatePrice(target);
+                const bankAfter = spendableCookies();
+                const incomeAfter = Math.max(planningIncome(), 0.001);
+                if (!Number.isFinite(priceAfter)) return null;
+                return Math.max(priceAfter - bankAfter, 0) / incomeAfter;
+            });
+            if (!Number.isFinite(via)) continue;
+            const saved = directEta - via;
+            // 測定揺れではなく、到達時刻を意味のある量だけ短縮する購入に限定する。
+            const minSaving = Math.max(0.25, directEta * 0.001);
+            if (saved < minSaving) continue;
+            if (!best || via < best.viaEta) best = { action, directEta, viaEta: via, saved };
+        }
+        return best;
+    }
+
+    function committedUpgradeDecision(candidate, affordable, bank, income, label) {
+        if (canAfford(candidate)) {
+            return { mode: 'buy', candidate, upgradeReservation: true, exclusiveAttempt: true,
+                reason: `${label}を購入` };
+        }
+        const accelerator = chooseCommitmentAcceleration(candidate, affordable);
+        if (accelerator) {
+            return {
+                mode: 'buy', candidate: accelerator.action, commitmentAcceleration: true, exclusiveAttempt: true,
+                reason: `${candidate.name}への到達を約${formatSeconds(accelerator.saved)}短縮する先行投資`
+            };
+        }
+        const eta = Math.max(finite(candidate.immediatePrice, Infinity) - bank, 0) / income;
+        const wait = waitPlannerAction(Math.max(1, Math.ceil(eta)), bank, income, candidate);
+        wait.boundedWait = true;
+        wait.upgradeReservation = true;
+        wait.waitTarget = candidate;
+        return { mode: 'wait', candidate: wait, boundedWait: true, upgradeReservation: true,
+            reason: `${label}：直接貯蓄が全購入経路より速い（約${formatSeconds(eta)}）` };
+    }
+
+    // 最終選択器より先に、Upgradeと施設の限界投資効率を直接比較する。
+    // 価格、分類フラグ、Beam Utilityはここでは使用しない。
+    function chooseUpgradeRoiFrontier(current, affordable) {
+        if (!settings.buyUpgrades) return null;
+        const upgrades = (current || []).filter((c) => isUpgradeLike(c) &&
+            Number.isFinite(c.repaySeconds) && c.repaySeconds > 0);
+        if (!upgrades.length) return null;
+        const buildings = (current || []).filter((c) => isBuildingPurchaseCandidate(c) &&
+            Number.isFinite(c.repaySeconds) && c.repaySeconds > 0);
+        const bestBuildingRepay = buildings.reduce((best, c) => Math.min(best, c.repaySeconds), Infinity);
+        const tolerance = 1.05;
+        const dominant = upgrades.filter((c) => !Number.isFinite(bestBuildingRepay) ||
+            c.repaySeconds <= bestBuildingRepay * tolerance)
+            .sort((a, b) => {
+                const aTotal = finite(a.waitSeconds, Infinity) + a.repaySeconds;
+                const bTotal = finite(b.waitSeconds, Infinity) + b.repaySeconds;
+                return aTotal - bTotal || a.repaySeconds - b.repaySeconds;
+            })[0];
+        if (!dominant) return null;
+
+        reservedUpgrade = {
+            id: dominant.target && dominant.target.id !== undefined ? dominant.target.id : null,
+            name: dominant.name,
+            startedAt: Date.now()
+        };
+        const decision = committedUpgradeDecision(dominant, affordable, spendableCookies(),
+            Math.max(planningIncome(), 0.001), 'ROIフロンティアUpgrade');
+        decision.reason += `（Upgrade回収 ${formatSeconds(dominant.repaySeconds)} / 最良施設回収 ${Number.isFinite(bestBuildingRepay) ? formatSeconds(bestBuildingRepay) : 'なし'}）`;
+        decision.roiFrontier = true;
+        decision.roiComparison = { upgradeRepay: dominant.repaySeconds, buildingRepay: bestBuildingRepay };
+        return decision;
+    }
+
+    // 高価値Upgradeを目標として保持する。固定待機秒数ではなく、各周期の全経路ETAで行動を決める。
+    function chooseUpgradeReservation(current, affordable) {
+        if (!settings.upgradeReservationEnabled || !settings.buyUpgrades) {
+            reservedUpgrade = { id: null, name: '', startedAt: 0 };
+            return null;
+        }
+        const bank = spendableCookies();
+        const income = Math.max(planningIncome(), 0.001);
+        const maxEta = Math.max(1, finite(settings.upgradeReservationMaxEtaSeconds, 180));
+        const maxPayback = Math.max(1, finite(settings.upgradeReservationMaxPaybackSeconds, 1800));
+        const minRatio = Math.max(1, finite(settings.upgradeReservationMinNetRatio, 1.05));
+        const immediateBest = (affordable || []).slice()
+            .sort((a, b) => strategyAdjustedCandidateScore(a) - strategyAdjustedCandidateScore(b))[0] || null;
+        const immediateValue = immediateBest ? Math.max(0, candidateWeightedNetValue(immediateBest)) : 0;
+        const bestImmediatePayback = (affordable || []).reduce((best, item) =>
+            Math.min(best, finite(item && item.repaySeconds, Infinity)), Infinity);
+
+        // 一度予約したUpgradeは毎周期の候補順位から切り離し、購入成功まで同じ対象を保持する。
+        if (reservedUpgrade.id !== null || reservedUpgrade.name) {
+            const upgrade = (Game.UpgradesById || []).find((up) => up &&
+                ((reservedUpgrade.id !== null && up.id === reservedUpgrade.id) || up.name === reservedUpgrade.name));
+            if (!upgrade || upgrade.bought || !upgradeAllowed(upgrade)) {
+                reservedUpgrade = { id: null, name: '', startedAt: 0 };
+            } else {
+                const candidate = (current || []).find((item) => item && item.target === upgrade) || candidateBase({
+                    type: 'fallbackUpgrade',
+                    target: upgrade,
+                    name: upgrade.name,
+                    price: upgradePrice(upgrade),
+                    immediatePrice: upgradePrice(upgrade),
+                    score: 0.001,
+                    repaySeconds: 0,
+                    affordable: upgradePrice(upgrade) <= bank,
+                    upgradePriority: true,
+                    critical: true,
+                    reason: '保持中のUpgrade予約',
+                    source: 'persistent-reservation'
+                });
+                return committedUpgradeDecision(candidate, affordable, bank, income, 'Upgrade目標保持中');
+            }
+        }
+
+        const target = (current || [])
+            // 全Upgradeを同じ投資集合で比較する。旧実装はpriority/criticalだけを残したため、
+            // 実測ROIが優秀でも通常Upgradeはここへ到達せず、施設価格との比較まで延期されていた。
+            .filter((candidate) => isUpgradeLike(candidate) &&
+                Number.isFinite(candidate.repaySeconds) && candidate.repaySeconds >= 0)
+            .map((candidate) => {
+                const eta = Math.max(finite(candidate.immediatePrice, Infinity) - bank, 0) / income;
+                const netValue = candidateWeightedNetValue(candidate);
+                const knownClickMultiplier = EARLY_CLICK_MULTIPLIER_UPGRADES.has(String(candidate.name || '').toLowerCase());
+                const linkedBuildingCandidate = candidate.buildingMultiplierUpgrade && candidate.linkedBuilding
+                    ? (current || []).find((item) => isBuildingPurchaseCandidate(item) && item.target === candidate.linkedBuilding)
+                    : null;
+                // 施設2倍Upgradeは「長期評価窓内で黒字か」だけでは判定しない。
+                // 同じ施設をもう1個買うより投資回収が速くなった時点を予約開始点にする。
+                const tiedAmount = Math.max(0, finite(candidate.linkedBuilding && candidate.linkedBuilding.amount, 0));
+                // 2倍Upgradeは現在の全保有数と同じだけ施設を追加する効果を持つ。
+                // 実測CpSがModや状態更新順で不安定でも「価格÷保有数」と次施設価格を比較できる。
+                const equivalentUnitCost = tiedAmount > 0
+                    ? finite(candidate.immediatePrice, Infinity) / tiedAmount
+                    : Infinity;
+                const tierEfficiencyDominant = Boolean(linkedBuildingCandidate && (
+                    finite(candidate.repaySeconds, Infinity) <= finite(linkedBuildingCandidate.repaySeconds, Infinity) * 1.05 ||
+                    equivalentUnitCost <= finite(linkedBuildingCandidate.immediatePrice, Infinity) * 1.05
+                ));
+                // 全候補を共通尺度へ落とす。取得後の回収が今買える最良投資以上なら、
+                // 種別に関係なく「貯蓄すべき投資目標」として扱う。
+                const investmentDominant = Number.isFinite(candidate.repaySeconds) &&
+                    (!Number.isFinite(bestImmediatePayback) || candidate.repaySeconds <= bestImmediatePayback * 1.05);
+                const acquisitionScore = eta + Math.max(0, finite(candidate.repaySeconds, Infinity));
+                return { candidate, eta, netValue, knownClickMultiplier, tierEfficiencyDominant,
+                    investmentDominant, equivalentUnitCost, acquisitionScore };
+            })
+            .filter((item) => {
+                const priorityException = item.knownClickMultiplier || item.tierEfficiencyDominant || item.investmentDominant;
+                const allowedEta = priorityException
+                    ? Infinity
+                    : maxEta;
+                const allowedPayback = item.tierEfficiencyDominant ? Math.max(maxPayback, 3600) : maxPayback;
+                const valueQualified = priorityException ||
+                    (item.netValue > 0 && item.netValue >= immediateValue * minRatio);
+                return Number.isFinite(item.eta) && item.eta <= allowedEta &&
+                    (priorityException || finite(item.candidate.repaySeconds, Infinity) <= allowedPayback) && valueQualified;
+            })
+            .sort((a, b) => a.acquisitionScore - b.acquisitionScore ||
+                strategyAdjustedCandidateScore(a.candidate) - strategyAdjustedCandidateScore(b.candidate) ||
+                b.netValue - a.netValue)[0];
+
+        if (!target) return null;
+        reservedUpgrade = {
+            id: target.candidate.target && target.candidate.target.id !== undefined ? target.candidate.target.id : null,
+            name: target.candidate.name,
+            startedAt: Date.now()
+        };
+        return committedUpgradeDecision(target.candidate, affordable, bank, income, 'Upgrade目標');
+    }
+
+    function preferAffordableUpgrade(best, affordable) {
+        if (!best || !settings.buyUpgrades) return best;
+        const upgrade = (affordable || [])
+            .filter((candidate) => isUpgradeLike(candidate) && canAfford(candidate))
+            .sort((a, b) => strategyAdjustedCandidateScore(a) - strategyAdjustedCandidateScore(b))[0];
+        if (!upgrade) return best;
+        const tolerance = clamp(finite(settings.upgradePreferenceTolerance, 1.20), 1, 2);
+        if (strategyAdjustedCandidateScore(upgrade) <= strategyAdjustedCandidateScore(best) * tolerance) return upgrade;
+
+        const upgradeValue = candidateWeightedNetValue(upgrade);
+        const bestValue = candidateWeightedNetValue(best);
+        if (upgradeValue > 0 && upgradeValue >= Math.max(0, bestValue) * 0.95) return upgrade;
+        return best;
+    }
+
+    // 上位候補が施設だけで埋まり、UpgradeがBeam Searchから消えることを防ぐ。
+    function selectDiversePlannerCandidates(all, branchLimit) {
+        const limit = Math.max(1, Math.floor(finite(branchLimit, 8)));
+        const upgradeSlots = Math.min(limit, Math.max(1, Math.floor(finite(settings.plannerUpgradeSlots, 3))));
+        const chosen = [];
+        const chosenKeys = new Set();
+        const add = (candidate) => {
+            if (!candidate || chosen.length >= limit) return;
+            const key = plannerCandidateKey(candidate);
+            if (chosenKeys.has(key)) return;
+            chosenKeys.add(key);
+            chosen.push(candidate);
+        };
+
+        all.filter(isUpgradeLike).slice(0, upgradeSlots).forEach(add);
+        all.filter((c) => String(c.source || '').startsWith('unlock-')).slice(0, 2).forEach(add);
+        all.forEach(add);
+        return chosen.sort((a, b) => strategyAdjustedCandidateScore(a) - strategyAdjustedCandidateScore(b));
+    }
+
+    function waitPlannerAction(seconds, bank, income, target = null) {
+        const targetPrice = target ? finite(target.immediatePrice, Infinity) : bank + income * seconds;
+        return candidateBase({
+            type: 'waitAction',
+            name: target ? `${target.name}まで待機（最大${seconds}秒）` : `コンボ待機 ${seconds}秒`,
+            price: 0,
+            immediatePrice: targetPrice,
+            score: seconds,
+            waitSeconds: seconds,
+            affordable: false,
+            waitDuration: seconds,
+            waitTargetKey: target ? plannerCandidateKey(target) : '',
+            waitTargetName: target ? target.name : 'Natural Golden Cookie',
+            waitUntil: target ? 'affordable' : 'combo-starter',
+            targetCandidate: target,
+            reason: target
+                ? `${target.name}が購入可能になるまで待機し、条件成立または上限到達で再計画`
+                : 'Natural buffまたは待機上限まで資金とMagicを維持',
+            source: 'beam-wait'
+        });
+    }
+
+    function snapshotPlannerGameState() {
+        return {
+            cookies: finite(Game.cookies, 0),
+            achievementsOwned: finite(Game.AchievementsOwned, 0),
+            milkProgress: finite(Game.milkProgress, 0),
+            objects: (Game.ObjectsById || []).map((obj) => ({ obj, amount: obj.amount, bought: obj.bought })),
+            upgrades: (Game.UpgradesById || []).map((up) => ({ up, bought: up.bought, unlocked: up.unlocked })),
+            achievements: (Game.AchievementsById || []).map((ach) => ({ ach, won: ach.won }))
+        };
+    }
+
+    function restorePlannerGameState(snapshot) {
+        Game.cookies = snapshot.cookies;
+        Game.AchievementsOwned = snapshot.achievementsOwned;
+        Game.milkProgress = snapshot.milkProgress;
+        for (const item of snapshot.objects) {
+            item.obj.amount = item.amount;
+            item.obj.bought = item.bought;
+        }
+        for (const item of snapshot.upgrades) {
+            item.up.bought = item.bought;
+            item.up.unlocked = item.unlocked;
+        }
+        for (const item of snapshot.achievements) item.ach.won = item.won;
+        if (typeof Game.CalculateGains === 'function') Game.CalculateGains();
+    }
+
+    function refreshVirtualUnlocks() {
+        let newAchievements = 0;
+        for (const obj of Game.ObjectsById || []) {
+            if (!obj) continue;
+            for (const up of Object.values(obj.tieredUpgrades || {})) {
+                const tier = up && Game.Tiers && Game.Tiers[up.tier];
+                if (up && tier && finite(obj.amount, 0) >= finite(tier.unlock, Infinity)) up.unlocked = 1;
+            }
+            for (const ach of Object.values(obj.tieredAchievs || {})) {
+                const tier = ach && Game.Tiers && Game.Tiers[ach.tier];
+                if (!ach || !tier || ach.won) continue;
+                if (finite(obj.amount, 0) >= finite(tier.achievUnlock, Infinity)) {
+                    ach.won = 1;
+                    if (!ach.pool || ach.pool === 'normal') newAchievements++;
+                }
+            }
+        }
+
+        if (newAchievements > 0) {
+            Game.AchievementsOwned = finite(Game.AchievementsOwned, 0) + newAchievements;
+            Game.milkProgress = finite(Game.AchievementsOwned, 0) / 25;
+        }
+
+        for (const [name, threshold] of KITTEN_UNLOCKS) {
+            const up = Game.Upgrades && Game.Upgrades[name];
+            if (up && !up.bought && finite(Game.AchievementsOwned, 0) >= threshold) up.unlocked = 1;
+        }
+
+        for (const up of Game.UpgradesById || []) {
+            if (!up || up.bought || !up.buildingTie1 || !up.buildingTie2 || !Game.Tiers || !Game.Tiers[up.tier]) continue;
+            const tier = Game.Tiers[up.tier];
+            if (!tier.special || (tier.require && !hasUpgrade(tier.require))) continue;
+            const threshold = finite(tier.unlock, Infinity);
+            if (finite(up.buildingTie1.amount, 0) >= threshold && finite(up.buildingTie2.amount, 0) >= threshold) up.unlocked = 1;
+        }
+    }
+
+    function virtualCandidatePrice(candidate) {
+        if (!candidate || !candidate.target) return Infinity;
+        if (isBuildingPurchaseCandidate(candidate)) return getSingleBuildingPrice(candidate.target);
+        if (isUpgradePurchaseCandidate(candidate) || candidate.type === 'fallbackUpgrade') return upgradePrice(candidate.target);
+        return finite(candidate.immediatePrice, Infinity);
+    }
+
+    function applyVirtualPlannerAction(action) {
+        if (!action) return false;
+        if (action.type === 'waitAction') {
+            const seconds = clamp(finite(action.waitDuration, 30), 1, 120);
+            Game.cookies = finite(Game.cookies, 0) + planningIncome() * seconds;
+            return true;
+        }
+
+        const price = virtualCandidatePrice(action);
+        if (!Number.isFinite(price) || price > spendableCookies() + 1e-9) return false;
+        Game.cookies = Math.max(0, finite(Game.cookies, 0) - price);
+
+        if (isBuildingPurchaseCandidate(action)) {
+            action.target.amount = finite(action.target.amount, 0) + 1;
+            if (typeof action.target.bought === 'number') action.target.bought++;
+        } else if (action.target && 'bought' in action.target) {
+            action.target.bought = 1;
+        } else {
+            return false;
+        }
+
+        refreshVirtualUnlocks();
+        if (typeof Game.CalculateGains === 'function') Game.CalculateGains();
+        return true;
+    }
+
+    function withVirtualPlannerActions(actions, fn) {
+        const snapshot = snapshotPlannerGameState();
+        const originalWin = Game.Win;
+        const originalUnlock = Game.Unlock;
+        try {
+            Game.Win = function () {};
+            Game.Unlock = function () {};
+            for (const action of actions || []) {
+                if (!applyVirtualPlannerAction(action)) return null;
+            }
+            return fn();
+        } catch (e) {
+            console.warn('[CC Auto] dynamic beam virtual state failed', e);
+            return null;
+        } finally {
+            restorePlannerGameState(snapshot);
+            Game.Win = originalWin;
+            Game.Unlock = originalUnlock;
+        }
+    }
+
+    function evaluateBeamNode(node, horizon, baseIncome) {
+        const remaining = Math.max(0, horizon - node.elapsed);
+        const weights = strategyWeights();
+        const bank = spendableCookies();
+        const income = planningIncome();
+        const futureWealth = bank + income * remaining;
+        const unlockValue = node.unlockSeconds * baseIncome * weights.unlock;
+        const comboValue = node.comboRate * remaining * weights.combo;
+        const liquidityTarget = getReserve();
+        const liquidityPenalty = Math.max(0, liquidityTarget - finite(Game.cookies, 0)) * weights.liquidity;
+        const delayPenalty = node.elapsed * baseIncome * 0.03;
+        return futureWealth + unlockValue + comboValue - liquidityPenalty - delayPenalty;
+    }
+
+    function dynamicPlannerCandidates(branchLimit) {
+        const current = getCurrentCandidates();
+        const future = getFutureCandidates();
+        const fallbacks = getGuaranteedFallbackCandidates();
+        const affordable = applyTargetEtaScoring(getAffordableImmediateSet(current, fallbacks), current, future);
+        const seen = new Set();
+        const all = [...affordable, ...current, ...future, ...fallbacks]
+            .filter((candidate) => {
+                if (!candidate || !Number.isFinite(candidate.immediatePrice) || candidate.immediatePrice <= 0) return false;
+                const key = plannerCandidateKey(candidate);
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            })
+            .sort((a, b) => strategyAdjustedCandidateScore(a) - strategyAdjustedCandidateScore(b));
+        return { all: selectDiversePlannerCandidates(all, branchLimit), current, future, fallbacks };
+    }
+
+    function targetedWaitActions(candidates, elapsed, horizon) {
+        const bank = spendableCookies();
+        const income = planningIncome();
+        const maxWait = Math.min(
+            Math.max(5, finite(settings.targetedWaitMaxSeconds, 120)),
+            Math.max(0, horizon - elapsed)
+        );
+        const waits = [];
+        for (const candidate of candidates) {
+            if (canAfford(candidate)) continue;
+            const eta = Math.max(finite(candidate.immediatePrice, Infinity) - bank, 0) / Math.max(income, 0.001);
+            if (!Number.isFinite(eta) || eta <= 0 || eta > maxWait) continue;
+            waits.push(waitPlannerAction(Math.max(5, Math.ceil(eta)), bank, income, candidate));
+            if (waits.length >= 2) break;
+        }
+        if ([STRATEGY.COMBO_PREP, STRATEGY.COMBO_WAIT].includes(strategyState) && maxWait >= 30) {
+            waits.push(waitPlannerAction(Math.min(30, maxWait), bank, income));
+        }
+        return waits;
+    }
+
+    function buildBeamPlan(current, future, fallbacks) {
+        if (!settings.beamPlannerEnabled) return null;
+
+        const depth = clamp(Math.floor(finite(settings.beamDepth, 3)), 2, 3);
+        const width = clamp(Math.floor(finite(settings.beamWidth, 8)), 2, 20);
+        const branchLimit = clamp(Math.floor(finite(settings.beamBranchLimit, 8)), 2, 20);
+        const horizon = Math.max(60, finite(settings.beamHorizonSeconds, 600));
+        const timeBudget = clamp(finite(settings.beamTimeBudgetMs, 120), 30, 500);
+        const startedAt = Date.now();
+        const baseIncome = planningIncome();
+        let beam = [{ elapsed: 0, actions: [], unlockSeconds: 0, comboRate: 0, utility: spendableCookies() + baseIncome * horizon }];
+        let best = beam[0];
+        purchaseDiag.beamExpanded = 0;
+        purchaseDiag.beamTimedOut = false;
+
+        for (let level = 0; level < depth; level++) {
+            if (Date.now() - startedAt >= timeBudget) { purchaseDiag.beamTimedOut = true; break; }
+            const expanded = [];
+            for (const node of beam) {
+                if (Date.now() - startedAt >= timeBudget) { purchaseDiag.beamTimedOut = true; break; }
+                withVirtualPlannerActions(node.actions, () => {
+                    const generated = dynamicPlannerCandidates(branchLimit);
+                    const affordable = generated.all.filter(canAfford).slice(0, branchLimit);
+                    const waits = targetedWaitActions(generated.all, node.elapsed, horizon);
+
+                    for (const action of [...affordable, ...waits]) {
+                        if (Date.now() - startedAt >= timeBudget) { purchaseDiag.beamTimedOut = true; break; }
+                        const next = {
+                            elapsed: node.elapsed + (action.type === 'waitAction' ? finite(action.waitDuration, 0) : 0),
+                            actions: [...node.actions, action],
+                            unlockSeconds: node.unlockSeconds + (action.type === 'waitAction' ? 0 : candidateUnlockSeconds(action)),
+                            comboRate: node.comboRate + (action.type === 'waitAction' ? 0 : candidateComboRate(action))
+                        };
+                        const utility = withVirtualPlannerActions([action], () => evaluateBeamNode(next, horizon, baseIncome));
+                        if (!Number.isFinite(utility)) continue;
+                        next.utility = utility;
+                        expanded.push(next);
+                        purchaseDiag.beamExpanded++;
+                    }
+                });
+            }
+
+            if (!expanded.length) break;
+            expanded.sort((a, b) => b.utility - a.utility);
+            beam = expanded.slice(0, width);
+            if (beam[0] && beam[0].utility > best.utility) best = beam[0];
+        }
+
+        if (!best.actions.length) return null;
+        purchaseDiag.beamDepth = depth;
+        purchaseDiag.beamUtility = best.utility;
+        purchaseDiag.beamPlan = best.actions.map((a) => a.name).join(' → ');
+        lastBeamPlan = best.actions;
+        lastBeamUtility = best.utility;
+        return best;
+    }
+
+    function buildPurchaseDecision() {
+        const current = getCurrentCandidates();
+        const fallbacks = getGuaranteedFallbackCandidates();
+        const future = getFutureCandidates();
+        const affordableRaw = getAffordableImmediateSet(current, fallbacks);
+        const affordable = applyTargetEtaScoring(affordableRaw, current, future);
+
+        lastUnlockGoals = buildUnlockGoals();
+        lastCandidates = uniqueCandidates([...affordable, ...current, ...future, ...fallbacks])
+            .sort((a, b) => a.score - b.score)
+            .slice(0, 10);
+
+        purchaseDiag.currentCount = current.length;
+        purchaseDiag.affordableCount = affordable.length;
+        purchaseDiag.fallbackAffordableCount = fallbacks.filter(canAfford).length;
+        purchaseDiag.futureCount = future.length;
+        const rawVisible = uniqueCandidates([...current, ...fallbacks]);
+        purchaseDiag.rawAffordableCount = rawVisible.filter((c) => finite(c.immediatePrice, Infinity) <= finite(Game.cookies, 0) + 1e-9).length;
+        purchaseDiag.reserveBlockedCount = rawVisible.filter((c) =>
+            finite(c.immediatePrice, Infinity) <= finite(Game.cookies, 0) + 1e-9 && !canAfford(c)
+        ).length;
+
+        purchaseDiag.etaCandidate = '-';
+        purchaseDiag.etaTarget = '-';
+        purchaseDiag.etaKind = 'ETA';
+        purchaseDiag.etaDirect = 0;
+        purchaseDiag.etaVia = 0;
+        purchaseDiag.etaSaved = 0;
+        purchaseDiag.etaSavedRatio = 0;
+
+        const bestEtaCandidate = affordable
+            .filter((c) => finite(c.etaSavedSeconds, 0) > 0)
+            .sort((a, b) => finite(b.etaSavedRatio, 0) - finite(a.etaSavedRatio, 0))[0];
+
+        if (bestEtaCandidate) {
+            purchaseDiag.etaCandidate = bestEtaCandidate.name;
+            purchaseDiag.etaTarget = bestEtaCandidate.etaTargetName || '-';
+            purchaseDiag.etaKind = bestEtaCandidate.etaKind || 'Target ETA';
+            purchaseDiag.etaDirect = finite(bestEtaCandidate.etaDirectSeconds, 0);
+            purchaseDiag.etaVia = finite(bestEtaCandidate.etaViaSeconds, 0);
+            purchaseDiag.etaSaved = finite(bestEtaCandidate.etaSavedSeconds, 0);
+            purchaseDiag.etaSavedRatio = finite(bestEtaCandidate.etaSavedRatio, 0);
+        }
+
+        const opening = getOpeningBookDecision(current, fallbacks);
+        if (opening) {
+            return {
+                ...opening,
+                current,
+                fallbacks,
+                future,
+                affordable
+            };
+        }
+
+        const roiFrontier = chooseUpgradeRoiFrontier(current, affordable);
+        if (roiFrontier) {
+            return {
+                ...roiFrontier,
+                current, fallbacks, future, affordable
+            };
+        }
+
+        const upgradeReservation = chooseUpgradeReservation(current, affordable);
+        if (upgradeReservation) {
+            return {
+                ...upgradeReservation,
+                current,
+                fallbacks,
+                future,
+                affordable
+            };
+        }
+
+        const rootEtaTargetCount = purchaseDiag.etaTargetsEvaluated;
+        const beam = buildBeamPlan(uniqueCandidates([...affordable, ...current]), future, fallbacks);
+        purchaseDiag.etaTargetsEvaluated = rootEtaTargetCount;
+        if (beam && beam.actions.length) {
+            const first = beam.actions[0];
+
+            if (first.type === 'waitAction') {
+                // Beam内部の長期待機は、購入可能品がある場合は採用しない。
+                // v8.5の適応型例外はchooseBoundedStrategicWaitで別途厳格に判定する。
+                if (!affordable.length) {
+                    return {
+                        mode: 'wait',
+                        candidate: first,
+                        reason: `Beam Search：${purchaseDiag.beamPlan}`,
+                        current,
+                        fallbacks,
+                        future,
+                        affordable,
+                        plan: beam.actions
+                    };
+                }
+            } else if (canAfford(first)) {
+                const preferred = preferAffordableUpgrade(first, uniqueCandidates([...affordable, ...current, ...future]));
+                const boundedWait = chooseBoundedStrategicWait(current, future, preferred);
+                if (boundedWait) {
+                    return {
+                        mode: 'wait',
+                        candidate: boundedWait,
+                        boundedWait: true,
+                        reason: adaptiveWaitReason(boundedWait),
+                        current,
+                        fallbacks,
+                        future,
+                        affordable,
+                        plan: beam.actions
+                    };
+                }
+                return {
+                    mode: 'buy',
+                    candidate: preferred,
+                    reason: preferred !== first ? `Beam Search＋Upgrade優先：${preferred.name}` : `Beam Search：${purchaseDiag.beamPlan}`,
+                    current,
+                    fallbacks,
+                    future,
+                    affordable,
+                    plan: beam.actions
+                };
+            }
+        }
+
+        // 最重要原則：今買えるものがあるなら、通常は買う。
+        if (affordable.length) {
+            const bestImmediate = preferAffordableUpgrade(affordable[0], affordable);
+
+            const boundedWait = chooseBoundedStrategicWait(current, future, bestImmediate);
+            if (boundedWait) {
+                return {
+                    mode: 'wait',
+                    candidate: boundedWait,
+                    boundedWait: true,
+                    reason: adaptiveWaitReason(boundedWait),
+                    current,
+                    fallbacks,
+                    future,
+                    affordable
+                };
+            }
+
+            // 解禁計画の次の施設が「今買える」うえに、現在候補より大幅に有利。
+            const rawFutureStep = chooseAffordableFutureStep(future, bestImmediate);
+            const futureStep = rawFutureStep ? preferAffordableUpgrade(rawFutureStep, affordable) : null;
+            if (futureStep) {
+                return {
+                    mode: 'buy',
+                    candidate: futureStep,
+                    reason: '今買える解禁計画の次の一手を優先',
+                    current,
+                    fallbacks,
+                    future,
+                    affordable
+                };
+            }
+
+            return {
+                mode: 'buy',
+                candidate: bestImmediate,
+                reason: '今すぐ買える候補を優先',
+                current,
+                fallbacks,
+                future,
+                affordable
+            };
+        }
+
+        // 今買える物が本当に1件も無い場合だけ貯蓄。
+        const target = chooseSavingsTarget(current, fallbacks);
+        return {
+            mode: target ? 'wait' : 'none',
+            candidate: target,
+            reason: target ? '現在購入可能な候補が0件のため貯蓄' : '購入対象なし',
+            current,
+            fallbacks,
+            future,
+            affordable
+        };
+    }
+
+    function executeCandidate(candidate) {
+        if (!candidate || !canAfford(candidate)) return false;
+
+        const buildingTypes = new Set([
+            'building', 'tierPlan', 'synergyPlan', 'achievementPlan', 'researchPlan', 'fallbackBuilding'
+        ]);
+
+        if (buildingTypes.has(candidate.type)) return buyOneBuilding(candidate.target, candidate);
+        return buyUpgrade(candidate.target, candidate);
+    }
+
+    function buildAttemptList(decision) {
+        if (!decision || decision.mode !== 'buy') return [];
+        // 予約対象の購入に一時的に失敗しても、同じ周期で施設へフォールバックしない。
+        if (decision.exclusiveAttempt || decision.upgradeReservation) return [decision.candidate].filter(canAfford);
+        return uniqueCandidates([
+            decision.candidate,
+            ...decision.affordable,
+            ...decision.fallbacks.filter(canAfford)
+        ]).filter(canAfford);
+    }
+
+    function smartPurchase() {
+        if (evaluating) return;
+        evaluating = true;
+        lastPurchaseError = '';
+
+        purchaseDiag.loops++;
+        purchaseDiag.lastRun = new Date().toLocaleTimeString();
+        purchaseDiag.attempts = 0;
+        purchaseDiag.pausedReason = '';
+
+        let activeDecision = null;
+        try {
+            updateStrategyState();
+
+            // Click Frenzy / Dragonflight等の実行中は、購入よりクリックを優先する。
+            if (strategyState === STRATEGY.COMBO_EXECUTE && isClickComboActive()) {
+                purchaseDiag.pausedReason = 'クリック系コンボ実行中';
+                purchaseDiag.decision = 'COMBO_EXECUTE：購入待機';
+                lastActionText = purchaseDiag.pausedReason;
+                return;
+            }
+
+            // 明示設定による従来のBuff停止も維持する。
+            if (settings.pausePurchasesDuringCombos && isMajorComboActive()) {
+                purchaseDiag.pausedReason = '高倍率Buff中（設定により停止）';
+                purchaseDiag.decision = 'PAUSE';
+                lastActionText = purchaseDiag.pausedReason;
+                return;
+            }
+
+            let decision = buildPurchaseDecision();
+            if (settings.strictPurchaseProgress && decision.mode === 'wait' && !decision.boundedWait && !decision.openingPriority && decision.affordable && decision.affordable.length) {
+                decision = {
+                    ...decision,
+                    mode: 'buy',
+                    candidate: decision.affordable[0],
+                    reason: '購入進行保証：購入可能品があるため待機を無効化'
+                };
+            }
+            activeDecision = decision;
+            lastDecision = decision.candidate;
+            purchaseDiag.selected = decision.candidate ? decision.candidate.name : '-';
+            purchaseDiag.decision = `${decision.mode.toUpperCase()}：${decision.reason}`;
+
+            if (decision.mode === 'none' || !decision.candidate) {
+                const emergency = getBestAffordableRawCandidate();
+                if (emergency && executeCandidate(emergency)) {
+                    consecutiveNoPurchase = 0;
+                    boundedWaitGuard = { key: '', cycles: 0, startedAt: 0 };
+                    openingWaitGuard = { cycles: 0, startedAt: 0 };
+                    lastPurchaseSuccessAt = Date.now();
+                    purchaseDiag.lastSuccess = `${new Date().toLocaleTimeString()} ${emergency.name}`;
+                    purchaseDiag.selected = emergency.name;
+                    purchaseDiag.decision = 'BUY成功：対象なし判定から緊急復帰';
+                    return;
+                }
+                consecutiveNoPurchase++;
+                lastActionText = '購入対象なし';
+                return;
+            }
+
+            if (decision.mode === 'wait') {
+                consecutiveNoPurchase++;
+                const need = Math.max(finite(decision.candidate.immediatePrice, 0) - spendableCookies(), 0);
+                lastActionText = `${decision.reason}：${decision.candidate.name}（あと${pretty(need)}）`;
+                return;
+            }
+
+            const attempts = buildAttemptList(decision);
+            const maxAttempts = Math.max(1, Math.floor(finite(settings.maxPurchaseAttempts, 8)));
+
+            for (const candidate of attempts.slice(0, maxAttempts)) {
+                purchaseDiag.attempts++;
+                if (!canAfford(candidate)) continue;
+
+                if (executeCandidate(candidate)) {
+                    if (decision.upgradeReservation) reservedUpgrade = { id: null, name: '', startedAt: 0 };
+                    consecutiveNoPurchase = 0;
+                    boundedWaitGuard = { key: '', cycles: 0, startedAt: 0 };
+                    openingWaitGuard = { cycles: 0, startedAt: 0 };
+                    lastPurchaseSuccessAt = Date.now();
+                    purchaseDiag.lastSuccess = `${new Date().toLocaleTimeString()} ${candidate.name}`;
+                    purchaseDiag.selected = candidate.name;
+                    purchaseDiag.decision = `BUY成功：${candidate.reason}`;
+                    return;
+                }
+
+                console.warn('[CC Auto] purchase attempt failed; trying next candidate', candidate.name, lastPurchaseError);
+            }
+
+            // 予約購入が失敗した場合は対象を保持し、次周期に同じUpgradeだけを再試行する。
+            if (decision.exclusiveAttempt || decision.upgradeReservation) {
+                consecutiveNoPurchase++;
+                lastActionText = `目標コミットメント中の購入を再試行：${decision.candidate.name}`;
+                purchaseDiag.decision = `排他的BUY再試行：${lastPurchaseError || '購入状態が未反映'}`;
+                return;
+            }
+
+            // 解析候補もfallbackも買えなかった場合、最安の現在購入可能品をもう一度生APIで試す。
+            const emergency = getBestAffordableRawCandidate();
+            if (emergency) {
+                purchaseDiag.attempts++;
+                lastDecision = emergency;
+                if (executeCandidate(emergency)) {
+                    consecutiveNoPurchase = 0;
+                    boundedWaitGuard = { key: '', cycles: 0, startedAt: 0 };
+                    openingWaitGuard = { cycles: 0, startedAt: 0 };
+                    lastPurchaseSuccessAt = Date.now();
+                    purchaseDiag.lastSuccess = `${new Date().toLocaleTimeString()} ${emergency.name}`;
+                    purchaseDiag.selected = emergency.name;
+                    purchaseDiag.decision = 'BUY成功：最終緊急Fallback';
+                    return;
+                }
+            }
+
+            consecutiveNoPurchase++;
+            lastActionText = `購入可能候補${decision.affordable.length}件だが全試行失敗`;
+            if (!lastPurchaseError) lastPurchaseError = '購入APIが成功を返さず、施設数/bought状態も変化しませんでした';
+        } catch (e) {
+            lastPurchaseError = String(e && (e.stack || e.message) || e);
+            if (activeDecision && (activeDecision.exclusiveAttempt || activeDecision.upgradeReservation)) {
+                consecutiveNoPurchase++;
+                lastActionText = `予約Upgradeの購入を次周期に再試行：${activeDecision.candidate && activeDecision.candidate.name || reservedUpgrade.name}`;
+                purchaseDiag.decision = '予約BUY例外：予約を保持';
+                console.error('[CC Auto] reserved upgrade purchase error', e);
+                return;
+            }
+            const emergency = getBestAffordableRawCandidate();
+            if (emergency && executeCandidate(emergency)) {
+                consecutiveNoPurchase = 0;
+                boundedWaitGuard = { key: '', cycles: 0, startedAt: 0 };
+                openingWaitGuard = { cycles: 0, startedAt: 0 };
+                lastPurchaseSuccessAt = Date.now();
+                purchaseDiag.lastSuccess = `${new Date().toLocaleTimeString()} ${emergency.name}`;
+                purchaseDiag.selected = emergency.name;
+                purchaseDiag.decision = 'BUY成功：例外から緊急Fallback復帰';
+            } else {
+                consecutiveNoPurchase++;
+                lastActionText = '購入エンジン例外（次周期で再試行）';
+                purchaseDiag.decision = 'ERROR';
+            }
+            console.error('[CC Auto] smartPurchase v8.5 error', e);
+        } finally {
+            evaluating = false;
+        }
+    }
+
+    // ゲームのストア状態だけから作る最終手段。
+    // ROI計算・Unlock計画・シミュレーションを一切使わない。
+    function getBestAffordableRawCandidate() {
+        const money = spendableCookies();
+        const raw = [];
+
+        if (settings.buyUpgrades) {
+            try {
+                for (const up of availableStoreUpgrades()) {
+                    const price = upgradePrice(up);
+                    if (price <= money) {
+                        let delta = 0;
+                        try {
+                            const sim = simulateUpgradeGain(up);
+                            const effect = estimateUpgradeEffect(up);
+                            delta = Math.max(sim.deltaEconomic, effect.delta, 0);
+                        } catch (_) {}
+                        // 効果不明Upgradeを価格だけで最優先にはしないが、復帰候補からも消さない。
+                        if (!(delta > 0)) delta = Math.max(economicIncome() * 0.002, 0.000001);
+                        raw.push(candidateBase({
+                            type: 'fallbackUpgrade', target: up, name: up.name,
+                            price, immediatePrice: price, deltaEconomic: delta,
+                            repaySeconds: price / delta, score: price / delta,
+                            affordable: true, reason: '最終復帰：Upgrade回収時間'
+                        }));
+                    }
+                }
+            } catch (_) {}
+        }
+
+        if (settings.buyBuildings) {
+            try {
+                for (const obj of Game.ObjectsById || []) {
+                    if (!obj || typeof obj.buy !== 'function') continue;
+                    if ('unlocked' in obj && obj.unlocked === 0) continue;
+                    const price = getSingleBuildingPrice(obj);
+                    if (price <= money) {
+                        const delta = Math.max(fallbackBuildingGain(obj), 0.000001);
+                        raw.push(candidateBase({
+                            type: 'fallbackBuilding', target: obj, name: obj.name,
+                            price, immediatePrice: price, deltaEconomic: delta,
+                            repaySeconds: price / delta, score: price / delta,
+                            affordable: true, reason: '最終復帰：施設回収時間'
+                        }));
+                    }
+                }
+            } catch (_) {}
+        }
+
+        // 復帰処理でも価格順には戻さない。最短回収を第一、同率時だけ価格を使う。
+        return raw.sort((a, b) => a.repaySeconds - b.repaySeconds || a.price - b.price)[0] || null;
+    }
+
+    function forcePurchaseTest() {
+        if (!Game || !gamePlayable()) {
+            lastActionText = '購入テスト：ゲーム未準備';
+            return;
+        }
+
+        lastPurchaseError = '';
+        const raw = [];
+        const current = getCurrentCandidates();
+        const fallbacks = getGuaranteedFallbackCandidates();
+        raw.push(...getAffordableImmediateSet(current, fallbacks));
+        const emergency = getBestAffordableRawCandidate();
+        if (emergency) raw.push(emergency);
+
+        const attempts = uniqueCandidates(raw).filter(canAfford);
+        if (!attempts.length) {
+            lastActionText = '購入テスト：今すぐ買える対象なし';
+            return;
+        }
+
+        for (const c of attempts.slice(0, 8)) {
+            if (executeCandidate(c)) {
+                purchaseDiag.lastSuccess = `${new Date().toLocaleTimeString()} ${c.name}（手動テスト）`;
+                purchaseDiag.decision = '購入テスト成功';
+                return;
+            }
+        }
+        lastActionText = '購入テスト：候補はあるが全て失敗';
+    }
+
+    function buyOneBuilding(obj, candidate) {
+        if (!obj || typeof obj.buy !== 'function') return false;
+        const oldMode = Game.buyMode;
+        const oldBulk = Game.buyBulk;
+
+        try {
+            Game.buyMode = 1;
+            Game.buyBulk = 1;
+            const before = finite(obj.amount, 0);
+
+            // 標準API
+            try { obj.buy(1); } catch (_) {}
+            let after = finite(obj.amount, 0);
+
+            // バージョン差に備え、引数なしも試す。
+            if (after <= before) {
+                try { obj.buy(); } catch (_) {}
+                after = finite(obj.amount, 0);
+            }
+
+            // UI側の公式クリック関数が存在する場合の最終fallback。
+            if (after <= before && typeof Game.ClickProduct === 'function') {
+                try { Game.ClickProduct(obj.id); } catch (_) {}
+                after = finite(obj.amount, 0);
+            }
+
+            if (after > before) {
+                lastActionText = `${obj.name}を1個購入`;
+                if (candidate && candidate.reason) lastActionText += `（${candidate.reason}）`;
+                lastDecision = null;
+                lastPurchaseError = '';
+                console.log('[CC Auto]', lastActionText);
+                return true;
+            }
+
+            lastPurchaseError = `${obj.name}: buy(1)/buy()/ClickProduct後も個数 ${before} → ${after}`;
+            return false;
+        } catch (e) {
+            lastPurchaseError = `${obj.name}: ${String(e && e.message || e)}`;
+            console.error('[CC Auto] building buy failed', e);
+            return false;
+        } finally {
+            Game.buyMode = oldMode;
+            Game.buyBulk = oldBulk;
+        }
+    }
+
+    function buyUpgrade(upgrade, candidate) {
+        if (!upgrade || typeof upgrade.buy !== 'function') return false;
+        try {
+            const before = Boolean(upgrade.bought);
+            const price = upgradePrice(upgrade);
+            const canBuyState = typeof upgrade.canBuy === 'function' ? Boolean(upgrade.canBuy()) : null;
+
+            // 旧版ではcanBuy()=falseだけで購入を中止していた。
+            // 診断情報として記録するだけで、実際に価格を払えるならbuy()を試す。
+            if (canBuyState === false) {
+                console.warn('[CC Auto] upgrade.canBuy() returned false; buy() will still be attempted', upgrade.name, price, Game.cookies);
+            }
+
+            upgrade.buy();
+            const after = Boolean(upgrade.bought);
+
+            if (!before && after) {
+                lastActionText = `${upgrade.name}を購入`;
+                if (candidate && candidate.reason) lastActionText += `（${candidate.reason}）`;
+                lastDecision = null;
+                lastPurchaseError = '';
+                console.log('[CC Auto]', lastActionText);
+                return true;
+            }
+
+            lastPurchaseError = `${upgrade.name}: canBuy=${canBuyState}, price=${price}, cookies=${finite(Game.cookies,0)}, buy()後もbought=false`;
+            return false;
+        } catch (e) {
+            lastPurchaseError = `${upgrade.name}: ${String(e && e.message || e)}`;
+            console.error('[CC Auto] upgrade buy failed', e);
+            return false;
+        }
+    }
+
+    // =====================================================================
+    // Grimoire
+    // =====================================================================
+
+    function getGrimoire() {
+        try {
+            const wiz = Game.Objects && Game.Objects['Wizard tower'];
+            if (!wiz || !wiz.minigameLoaded || !wiz.minigame) return null;
+            return wiz.minigame;
+        } catch (_) { return null; }
+    }
+
+    function currentExplicitCpsBuffMultiplier() {
+        let mult = 1;
+        try {
+            if (hasBuff('Frenzy')) mult = Math.max(mult, 7);
+            if (hasBuff('Elder frenzy')) mult = Math.max(mult, 666);
+            if (hasBuff('Dragon Harvest')) mult = Math.max(mult, 15);
+            for (const [name, buff] of Object.entries(Game.buffs || {})) {
+                if (String(name).toLowerCase().includes('building special')) {
+                    mult = Math.max(mult, finite(buff && buff.multCpS, finite(buff && buff.power, 1)));
+                }
+            }
+        } catch (_) {}
+        return mult;
+    }
+
+    function manageGrimoire() {
+        if (!settings.autoGrimoire || !settings.goldenCookie) return;
+        const M = getGrimoire();
+        if (!M || !M.spells || typeof M.castSpell !== 'function') return;
+
+        const spell = M.spells['hand of fate'];
+        if (!spell || typeof M.getSpellCost !== 'function') return;
+        if (hasBuff('Dragonflight') || hasBuff('Click frenzy')) return;
+
+        try {
+            if (Game.shimmerTypes && Game.shimmerTypes.golden && finite(Game.shimmerTypes.golden.n, 0) > 0) return;
+        } catch (_) {}
+
+        const buffMult = currentExplicitCpsBuffMultiplier();
+        if (strategyState !== STRATEGY.COMBO_EXECUTE && !hasNaturalComboStarter()) return;
+        if (buffMult < Math.max(1, finite(settings.fthofMinBuffMultiplier, 6))) return;
+
+        const cost = finite(M.getSpellCost(spell), Infinity);
+        if (!Number.isFinite(cost) || finite(M.magic, 0) < cost) return;
+
+        try {
+            const ok = M.castSpell(spell);
+            if (ok !== false) lastSpellText = `FtHoF詠唱（明示Buff x${buffMult.toFixed(1)}）`;
+        } catch (e) {
+            lastSpellText = 'FtHoF詠唱エラー';
+            console.warn('[CC Auto] FtHoF failed', e);
+        }
+    }
+
+    // =====================================================================
+    // Elder Pledge / Wrinklers
+    // =====================================================================
+
+    function manageElderPledge() {
+        if (!settings.autoPledge || !settings.goldenCookie) return;
+        if (!(finite(Game.elderWrath, 0) > 0)) return;
+        const pledge = Game.Upgrades && Game.Upgrades['Elder Pledge'];
+        if (!pledge || pledge.bought || !pledge.unlocked) return;
+        const price = upgradePrice(pledge);
+        if (!Number.isFinite(price) || finite(Game.cookies, 0) < price || isMajorComboActive()) return;
+        try { pledge.buy(); lastWrinklerText = 'Elder Pledgeを購入'; } catch (_) {}
+    }
+
+    function manageWrinklers() {
+        if (!settings.autoWrinklers || !Array.isArray(Game.wrinklers)) return;
+        const normals = activeWrinklers().filter((w) => finite(w.type, 0) !== 1);
+        if (!normals.length) { lastWrinklerText = '通常Wrinklerなし'; return; }
+
+        const mode = settings.wrinklerMode || 'smart';
+        if (mode === 'hold') { lastWrinklerText = `保持中（${activeWrinklers().length}匹）`; return; }
+
+        if (mode === 'pop') {
+            let count = 0;
+            for (const w of normals) { if (finite(w.sucked, 0) > 0) { w.hp = 0; count++; } }
+            if (count) lastWrinklerText = `通常Wrinklerを${count}匹破裂`;
+            return;
+        }
+
+        if (!lastDecision) { lastWrinklerText = `Smart保持（${activeWrinklers().length}匹）`; return; }
+
+        const deficit = Math.max(0, finite(lastDecision.immediatePrice, 0) - spendableCookies());
+        if (deficit <= 0) { lastWrinklerText = 'Smart保持（購入資金あり）'; return; }
+
+        const wait = deficit / Math.max(liquidIncome(), 0.001);
+        if (wait < Math.max(10, finite(settings.wrinklerPopMinWaitSeconds, 120))) {
+            lastWrinklerText = `Smart保持（待ち${formatSeconds(wait)}）`;
+            return;
+        }
+
+        const sorted = normals
+            .map((w) => ({ w, payout: wrinklerPayout(w) }))
+            .filter((x) => x.payout > 0)
+            .sort((a, b) => b.payout - a.payout);
+
+        const total = sorted.reduce((s, x) => s + x.payout, 0);
+        if (total < deficit) { lastWrinklerText = `Smart保持（虫銀行 ${pretty(total)}）`; return; }
+
+        let released = 0;
+        let count = 0;
+        for (const item of sorted) {
+            item.w.hp = 0;
+            released += item.payout;
+            count++;
+            if (released >= deficit) break;
+        }
+        lastWrinklerText = `購入資金化：${count}匹 / 約${pretty(released)}`;
+    }
+
+    // =====================================================================
+    // Ascend advisor
+    // =====================================================================
+
+    function getAscendAdvice() {
+        if (!settings.ascendAdvisor || typeof Game.HowMuchPrestige !== 'function') return null;
+        try {
+            const oldTotal = Math.max(0, finite(Game.cookiesReset, 0));
+            const currentRun = Math.max(0, finite(Game.cookiesEarned, 0));
+            const currentPrestige = Math.floor(Game.HowMuchPrestige(oldTotal));
+            const potentialPrestige = Math.floor(Game.HowMuchPrestige(oldTotal + currentRun));
+            const gain = Math.max(0, potentialPrestige - currentPrestige);
+            const ratio = gain / Math.max(currentPrestige, 1);
+            const nextGuide = ASCEND_EARLY_TARGETS.find((x) => x > currentPrestige) || null;
+
+            let level = 'wait';
+            let message = 'まだ待機';
+            if (currentPrestige === 0) {
+                if (potentialPrestige >= ASCEND_EARLY_TARGETS[0]) { level = 'strong'; message = `初回目安 ${ASCEND_EARLY_TARGETS[0]} に到達`; }
+                else message = `初回目安 ${ASCEND_EARLY_TARGETS[0]} まで ${ASCEND_EARLY_TARGETS[0] - potentialPrestige}`;
+            } else if (nextGuide && potentialPrestige >= nextGuide) {
+                level = 'strong'; message = `序盤ガイド目安 ${nextGuide} に到達`;
+            } else if (ratio >= finite(settings.ascendStrongGainRatio, 1)) {
+                level = 'strong'; message = `Prestige +${(ratio * 100).toFixed(0)}%可能`;
+            } else if (ratio >= finite(settings.ascendConsiderGainRatio, 0.5)) {
+                level = 'consider'; message = `Prestige +${(ratio * 100).toFixed(0)}%：検討域`;
+            }
+
+            return { currentPrestige, potentialPrestige, gain, ratio, level, message };
+        } catch (_) { return null; }
+    }
+
+    // =====================================================================
+    // UI
+    // =====================================================================
+
+    function sectionHtml(key, title, content) {
+        return `<div class="cc-auto-section">
+            <button class="cc-auto-section-toggle" type="button" data-section-toggle="${key}" aria-expanded="true">
+                <span>${title}</span><span data-section-chevron="${key}">▼</span>
+            </button>
+            <div id="ccSection-${key}" class="cc-auto-section-content">${content}</div>
+        </div>`;
+    }
+
+    function createPanel() {
+        const old = document.getElementById('cc-smart-auto-panel');
+        if (old) old.remove();
+
+        panel = document.createElement('div');
+        panel.id = 'cc-smart-auto-panel';
+        panel.innerHTML = `
+<style>
+#cc-smart-auto-panel{position:fixed;z-index:1000000;width:420px;height:760px;min-width:330px;min-height:210px;max-width:95vw;max-height:91vh;display:flex;flex-direction:column;overflow:hidden;resize:both;background:rgba(20,20,25,.97);color:#f5f5f5;border:1px solid #555;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.45);font:13px Arial,sans-serif}
+#cc-smart-auto-panel *{box-sizing:border-box}.cc-auto-header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:9px 10px;background:linear-gradient(135deg,#3a2e24,#201a17);border-bottom:1px solid #555;cursor:move;user-select:none}.cc-auto-title{color:#ffd68a;font-weight:700}.cc-auto-version{font-size:10px;color:#aaa;margin-left:6px}.cc-auto-body{flex:1 1 auto;min-height:0;overflow:auto;padding:8px 10px 12px}.cc-auto-master,.cc-auto-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:34px;border-bottom:1px solid rgba(255,255,255,.06)}.cc-auto-master{padding:0 2px 6px}.cc-auto-row label{flex:1;min-width:0}.cc-auto-section{margin-top:8px;border:1px solid rgba(255,255,255,.10);border-radius:7px;overflow:hidden;background:rgba(255,255,255,.025)}.cc-auto-section-toggle{width:100%;min-height:34px;display:flex;align-items:center;justify-content:space-between;padding:7px 9px;border:0;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.045);color:#ffd68a;cursor:pointer;font-weight:700;text-align:left}.cc-auto-section-toggle:hover{background:rgba(255,255,255,.075)}.cc-auto-section-content{padding:2px 8px 6px}.cc-auto-section-content[hidden]{display:none!important}.cc-auto-input,.cc-auto-select{width:108px;background:#111;color:#fff;border:1px solid #555;border-radius:4px;padding:4px 6px}.cc-auto-button{min-height:30px;border:1px solid #666;border-radius:5px;background:#333;color:#fff;cursor:pointer;padding:4px 8px}.cc-auto-button:hover{background:#444}.cc-auto-stop{width:100%;margin-top:10px;background:#742828;border-color:#a94444}.cc-auto-hint{margin-top:7px;color:#aaa;font-size:11px;line-height:1.45}.cc-auto-status{padding:7px 2px;line-height:1.5}.cc-auto-status hr{border:0;border-top:1px solid #555;margin:7px 0}.cc-auto-green{color:#7ee787}.cc-auto-yellow{color:#ffd68a}.cc-auto-red{color:#ff8585}.cc-auto-muted{color:#aaa}.cc-auto-plan{margin-top:5px;padding:6px;background:rgba(255,214,138,.06);border-radius:5px}.cc-auto-small{font-size:11px;color:#bbb}#cc-smart-auto-panel.cc-auto-collapsed{height:auto!important;min-height:0;resize:horizontal}#cc-smart-auto-panel.cc-auto-collapsed .cc-auto-body{display:none}#cc-smart-auto-panel.cc-auto-dragging{opacity:.92}
+</style>
+<div id="ccAutoHeader" class="cc-auto-header">
+    <div><span class="cc-auto-title">🍪 Smart Auto</span><span class="cc-auto-version">v${VERSION}</span></div>
+    <button id="ccAutoCollapse" class="cc-auto-button" type="button">－</button>
+</div>
+<div class="cc-auto-body">
+    <div class="cc-auto-master"><strong>マスター</strong><input id="ccMaster" type="checkbox"></div>
+
+    ${sectionHtml('click','🖱 自動クリック',`
+        <div class="cc-auto-row"><label>大クッキー</label><input id="ccAutoClick" type="checkbox"></div>
+        <div class="cc-auto-row"><label>クリック / 秒</label><input id="ccClickRate" class="cc-auto-input" type="number" min="1" max="100"></div>
+    `)}
+
+    ${sectionHtml('shimmer','✨ 特殊出現',`
+        <div class="cc-auto-row"><label>Golden Cookie</label><input id="ccGolden" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Wrath Cookie</label><input id="ccWrath" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Reindeer</label><input id="ccReindeer" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Fortuneニュース</label><input id="ccFortuneTicker" type="checkbox"></div>
+    `)}
+
+    ${sectionHtml('buy','🏭 自動購入',`
+        <div class="cc-auto-row"><label>自動購入</label><input id="ccAutoBuy" type="checkbox"></div>
+        <div class="cc-auto-row"><label>施設</label><input id="ccBuildings" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Upgrade</label><input id="ccUpgrades" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Utility</label><input id="ccUtility" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Research</label><input id="ccResearch" type="checkbox"></div>
+        <button id="ccPurchaseTest" class="cc-auto-button" type="button" style="width:100%;margin-top:7px">▶ 今すぐ買えるものを1つテスト購入</button>
+        <div class="cc-auto-hint">v8.5は施設・Upgrade・クリック効果を同じ実効収益で評価し、取得時間＋回収時間で投資目標を選びます。直接貯蓄より目標ETAを短縮する購入だけを許可し、局所的な施設購入で重要Upgradeが延期され続けることを防ぎます。</div>
+    `)}
+
+    ${sectionHtml('strategy','🧠 購入戦略',`
+        <div class="cc-auto-row"><label>Upgrade出現条件を先読み</label><input id="ccUnlockPlanner" type="checkbox"></div>
+        <div class="cc-auto-row"><label>将来候補を先読み</label><input id="ccFutureAware" type="checkbox"></div>
+        <div class="cc-auto-row"><label>高価Upgradeへの到達短縮</label><input id="ccTargetEta" type="checkbox"></div>
+        <div class="cc-auto-row"><label>未出現UpgradeへのChain ETA</label><input id="ccChainEta" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Strategy State Machine</label><input id="ccStrategyMachine" type="checkbox"></div>
+        <div class="cc-auto-row"><label>2～3手 Beam Search</label><input id="ccBeamPlanner" type="checkbox"></div>
+        <div class="cc-auto-row"><label>序盤の定石を使用</label><input id="ccOpeningBook" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Upgrade効果量を詳細評価</label><input id="ccEffectAware" type="checkbox"></div>
+        <div class="cc-auto-row"><label>複数期間の効率評価</label><input id="ccEfficiency" type="checkbox"></div>
+        <div class="cc-auto-row"><label>高価値Upgradeを予約購入</label><input id="ccUpgradeReserve" type="checkbox"></div>
+        <div class="cc-auto-row"><label>ETA比較による適応型待機</label><input id="ccBoundedWait" type="checkbox"></div>
+        <div class="cc-auto-row"><label>購入進行保証</label><input id="ccStrictProgress" type="checkbox"></div>
+        <div class="cc-auto-row"><label>施設Tier</label><input id="ccTierLookahead" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Synergy</label><input id="ccSynergyLookahead" type="checkbox"></div>
+        <div class="cc-auto-row"><label>実績/Milk/Kitten</label><input id="ccAchievementLookahead" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Research解禁</label><input id="ccResearchLookahead" type="checkbox"></div>
+        <div class="cc-auto-row"><label>高倍率Buff中は購入停止</label><input id="ccPauseCombo" type="checkbox"></div>
+        <div class="cc-auto-hint">直接貯蓄と先行購入後のETAを比較します。3秒・10%以上短縮できる場合だけ、通常45秒、重要Upgrade最大150秒まで待機し、1.5秒ごとに再評価します。</div>
+    `)}
+
+    ${sectionHtml('unlocks','🔓 出現条件',`<div id="ccUnlockStatus" class="cc-auto-status">計算中...</div>`)}
+
+    ${sectionHtml('grimoire','🔮 Grimoire',`
+        <div class="cc-auto-row"><label>FtHoF自動詠唱</label><input id="ccGrimoire" type="checkbox"></div>
+        <div class="cc-auto-row"><label>必要明示Buff倍率</label><input id="ccFthofBuff" class="cc-auto-input" type="number" min="1" max="100" step="0.5"></div>
+    `)}
+
+    ${sectionHtml('grandmapocalypse','👵 Grandmapocalypse',`
+        <div class="cc-auto-row"><label>Wrinkler自動管理</label><input id="ccWrinklers" type="checkbox"></div>
+        <div class="cc-auto-row"><label>Wrinklerモード</label><select id="ccWrinklerMode" class="cc-auto-select"><option value="smart">Smart換金</option><option value="hold">保持</option><option value="pop">即破裂</option></select></div>
+        <div class="cc-auto-row"><label>Elder Pledge自動</label><input id="ccPledge" type="checkbox"></div>
+    `)}
+
+    ${sectionHtml('bank','💰 Lucky銀行',`
+        <div class="cc-auto-row"><label>銀行残高を保護</label><input id="ccLuckyBank" type="checkbox"></div>
+        <div class="cc-auto-row"><label>戦略状態による自動保護額</label><input id="ccAutoReserve" type="checkbox"></div>
+        <div class="cc-auto-hint">自動保護額は初期OFFです。ONにするとCOMBO_WAIT等で購入可能資金が減ります。</div>
+    `)}
+
+    ${sectionHtml('ascend','🌌 Ascend Advisor',`
+        <div class="cc-auto-row"><label>Ascend判定表示</label><input id="ccAscendAdvisor" type="checkbox"></div>
+        <div id="ccAscendStatus" class="cc-auto-status">計算中...</div>
+    `)}
+
+    ${sectionHtml('status','📊 ステータス',`<div id="ccAutoStatus" class="cc-auto-status">計算中...</div>`)}
+
+    <button id="ccEmergencyStop" class="cc-auto-button cc-auto-stop" type="button">■ 全自動化を停止</button>
+    <div class="cc-auto-hint">ヘッダー：ドラッグ移動 / 右下：リサイズ。設定・位置・サイズは保存されます。</div>
+</div>`;
+
+        document.body.appendChild(panel);
+        applySavedPanelSize();
+        applySavedPanelPosition();
+        bindPanel();
+        syncControls();
+        applyAllSectionStates();
+        setCollapsed(Boolean(settings.panelCollapsed), false);
+        watchPanelResize();
+        enablePanelDragging();
+        updatePanel();
+    }
+
+    function bindPanel() {
+        const pairs = {
+            ccMaster:'master', ccAutoClick:'autoClick', ccGolden:'goldenCookie', ccWrath:'wrathCookie',
+            ccReindeer:'reindeer', ccFortuneTicker:'autoFortuneTicker', ccAutoBuy:'autoBuy', ccBuildings:'buyBuildings',
+            ccUpgrades:'buyUpgrades', ccUtility:'buyUtility', ccResearch:'buyResearch', ccUnlockPlanner:'unlockPlanner',
+            ccFutureAware:'futureAware', ccTargetEta:'targetEtaEnabled', ccChainEta:'chainEtaEnabled', ccStrategyMachine:'strategyStateMachine', ccBeamPlanner:'beamPlannerEnabled', ccOpeningBook:'openingBookEnabled', ccEffectAware:'effectAwareUpgradeValuation', ccEfficiency:'efficiencyMode', ccUpgradeReserve:'upgradeReservationEnabled', ccBoundedWait:'boundedStrategicWait', ccStrictProgress:'strictPurchaseProgress', ccTierLookahead:'tierLookahead', ccSynergyLookahead:'synergyLookahead',
+            ccAchievementLookahead:'achievementLookahead', ccResearchLookahead:'researchLookahead',
+            ccPauseCombo:'pausePurchasesDuringCombos', ccGrimoire:'autoGrimoire', ccWrinklers:'autoWrinklers',
+            ccPledge:'autoPledge', ccLuckyBank:'keepLuckyBank', ccAutoReserve:'automaticStrategyReserve', ccAscendAdvisor:'ascendAdvisor'
+        };
+        for (const [id, key] of Object.entries(pairs)) bindCheckbox(id, key);
+
+        bindNumber('ccClickRate', 'clicksPerSecond', 1, 100, true);
+        bindNumber('ccFthofBuff', 'fthofMinBuffMultiplier', 1, 100, false);
+
+        const wm = document.getElementById('ccWrinklerMode');
+        wm.addEventListener('change', () => { settings.wrinklerMode = wm.value; saveSettings(); updatePanel(); });
+
+        document.querySelectorAll('[data-section-toggle]').forEach((button) => {
+            button.addEventListener('click', () => toggleSection(button.dataset.sectionToggle));
+        });
+
+        document.getElementById('ccEmergencyStop').addEventListener('click', () => {
+            settings.master = false; saveSettings(); syncControls(); updatePanel();
+        });
+
+        const purchaseTest = document.getElementById('ccPurchaseTest');
+        if (purchaseTest) purchaseTest.addEventListener('click', () => { forcePurchaseTest(); updatePanel(); });
+
+        document.getElementById('ccAutoCollapse').addEventListener('click', () => setCollapsed(!settings.panelCollapsed, true));
+        window.addEventListener('resize', keepPanelOnScreen);
+    }
+
+    function bindCheckbox(id, property) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', () => { settings[property] = el.checked; saveSettings(); updatePanel(); });
+    }
+
+    function bindNumber(id, property, min, max, restart) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', () => {
+            settings[property] = clamp(finite(el.value, defaultSettings[property]), min, max);
+            saveSettings();
+            if (restart) restartTimers();
+            syncControls();
+        });
+    }
+
+    function syncControls() {
+        const pairs = {
+            ccMaster:'master', ccAutoClick:'autoClick', ccGolden:'goldenCookie', ccWrath:'wrathCookie',
+            ccReindeer:'reindeer', ccFortuneTicker:'autoFortuneTicker', ccAutoBuy:'autoBuy', ccBuildings:'buyBuildings',
+            ccUpgrades:'buyUpgrades', ccUtility:'buyUtility', ccResearch:'buyResearch', ccUnlockPlanner:'unlockPlanner',
+            ccFutureAware:'futureAware', ccTargetEta:'targetEtaEnabled', ccChainEta:'chainEtaEnabled', ccStrategyMachine:'strategyStateMachine', ccBeamPlanner:'beamPlannerEnabled', ccOpeningBook:'openingBookEnabled', ccEffectAware:'effectAwareUpgradeValuation', ccEfficiency:'efficiencyMode', ccUpgradeReserve:'upgradeReservationEnabled', ccBoundedWait:'boundedStrategicWait', ccStrictProgress:'strictPurchaseProgress', ccTierLookahead:'tierLookahead', ccSynergyLookahead:'synergyLookahead',
+            ccAchievementLookahead:'achievementLookahead', ccResearchLookahead:'researchLookahead',
+            ccPauseCombo:'pausePurchasesDuringCombos', ccGrimoire:'autoGrimoire', ccWrinklers:'autoWrinklers',
+            ccPledge:'autoPledge', ccLuckyBank:'keepLuckyBank', ccAutoReserve:'automaticStrategyReserve', ccAscendAdvisor:'ascendAdvisor'
+        };
+        for (const [id, key] of Object.entries(pairs)) {
+            const el = document.getElementById(id);
+            if (el) el.checked = Boolean(settings[key]);
+        }
+        const rate = document.getElementById('ccClickRate'); if (rate) rate.value = String(settings.clicksPerSecond);
+        const buff = document.getElementById('ccFthofBuff'); if (buff) buff.value = String(settings.fthofMinBuffMultiplier);
+        const wm = document.getElementById('ccWrinklerMode'); if (wm) wm.value = settings.wrinklerMode || 'smart';
+    }
+
+    function toggleSection(key) {
+        if (!(key in settings.sectionCollapsed)) return;
+        settings.sectionCollapsed[key] = !settings.sectionCollapsed[key];
+        saveSettings(); applySectionState(key);
+    }
+
+    function applyAllSectionStates() { Object.keys(settings.sectionCollapsed).forEach(applySectionState); }
+
+    function applySectionState(key) {
+        const content = document.getElementById(`ccSection-${key}`);
+        const button = document.querySelector(`[data-section-toggle="${key}"]`);
+        const chevron = document.querySelector(`[data-section-chevron="${key}"]`);
+        if (!content || !button || !chevron) return;
+        const collapsed = Boolean(settings.sectionCollapsed[key]);
+        content.hidden = collapsed;
+        button.setAttribute('aria-expanded', String(!collapsed));
+        chevron.textContent = collapsed ? '▶' : '▼';
+    }
+
+    function setCollapsed(collapsed, persist = true) {
+        if (!panel) return;
+        settings.panelCollapsed = Boolean(collapsed);
+        if (persist) saveSettings();
+        const button = document.getElementById('ccAutoCollapse');
+        if (collapsed) { panel.classList.add('cc-auto-collapsed'); if (button) button.textContent = '＋'; }
+        else { panel.classList.remove('cc-auto-collapsed'); applySavedPanelSize(); applySavedPanelPosition(); if (button) button.textContent = '－'; }
+    }
+
+    function applySavedPanelSize() {
+        if (!panel) return;
+        panel.style.width = clamp(finite(settings.panelWidth, 420), 330, Math.max(330, window.innerWidth - 20)) + 'px';
+        panel.style.height = clamp(finite(settings.panelHeight, 760), 210, Math.max(210, window.innerHeight - 20)) + 'px';
+    }
+
+    function applySavedPanelPosition() {
+        if (!panel) return;
+        const r = panel.getBoundingClientRect();
+        const storedLeft = Number(settings.panelLeft);
+        const storedTop = Number(settings.panelTop);
+        const left = clamp(Number.isFinite(storedLeft) ? storedLeft : 14, 0, Math.max(0, window.innerWidth - r.width));
+        const top = clamp(Number.isFinite(storedTop) ? storedTop : 80, 0, Math.max(0, window.innerHeight - r.height));
+        panel.style.left = left + 'px'; panel.style.top = top + 'px';
+    }
+
+    function keepPanelOnScreen() {
+        if (!panel) return;
+        const r = panel.getBoundingClientRect();
+        const left = clamp(r.left, 0, Math.max(0, window.innerWidth - r.width));
+        const top = clamp(r.top, 0, Math.max(0, window.innerHeight - r.height));
+        panel.style.left = left + 'px'; panel.style.top = top + 'px';
+        settings.panelLeft = Math.round(left); settings.panelTop = Math.round(top); saveSettings();
+    }
+
+    function watchPanelResize() {
+        if (!panel || typeof ResizeObserver === 'undefined') return;
+        if (resizeObserver) resizeObserver.disconnect();
+        let timer = null;
+        resizeObserver = new ResizeObserver(() => {
+            if (settings.panelCollapsed) return;
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                const r = panel.getBoundingClientRect();
+                if (r.width >= 330 && r.height >= 210) {
+                    settings.panelWidth = Math.round(r.width); settings.panelHeight = Math.round(r.height);
+                    saveSettings(); keepPanelOnScreen();
+                }
+            }, 150);
+        });
+        resizeObserver.observe(panel);
+    }
+
+    function enablePanelDragging() {
+        const header = document.getElementById('ccAutoHeader');
+        if (!panel || !header) return;
+        let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+
+        header.addEventListener('mousedown', (e) => {
+            if (e.button !== 0 || e.target.closest('button')) return;
+            const r = panel.getBoundingClientRect();
+            dragging = true; sx = e.clientX; sy = e.clientY; sl = r.left; st = r.top;
+            panel.classList.add('cc-auto-dragging'); document.body.style.userSelect = 'none'; e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const r = panel.getBoundingClientRect();
+            panel.style.left = clamp(sl + e.clientX - sx, 0, Math.max(0, window.innerWidth - r.width)) + 'px';
+            panel.style.top = clamp(st + e.clientY - sy, 0, Math.max(0, window.innerHeight - r.height)) + 'px';
+        });
+
+        const stop = () => {
+            if (!dragging) return;
+            dragging = false; panel.classList.remove('cc-auto-dragging'); document.body.style.userSelect = '';
+            const r = panel.getBoundingClientRect(); settings.panelLeft = Math.round(r.left); settings.panelTop = Math.round(r.top); saveSettings();
+        };
+        document.addEventListener('mouseup', stop); window.addEventListener('blur', stop);
+    }
+
+    // =====================================================================
+    // Display
+    // =====================================================================
+
+    function pretty(value) {
+        if (!Number.isFinite(Number(value))) return '-';
+        try { if (typeof PageWindow.Beautify === 'function') return PageWindow.Beautify(Number(value)); } catch (_) {}
+        return Number(value).toLocaleString();
+    }
+
+    function formatSeconds(seconds) {
+        if (!Number.isFinite(seconds)) return '-';
+        if (seconds < 60) return seconds.toFixed(1) + '秒';
+        if (seconds < 3600) return (seconds / 60).toFixed(1) + '分';
+        if (seconds < 86400) return (seconds / 3600).toFixed(1) + '時間';
+        return (seconds / 86400).toFixed(1) + '日';
+    }
+
+    function escapeHtml(text) {
+        return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+    }
+
+    function typeLabel(type) {
+        return ({
+            building:'施設', upgrade:'Upgrade', strategic:'戦略Upgrade', utility:'Utility',
+            tierPlan:'Tier解禁計画', synergyPlan:'Synergy解禁計画', achievementPlan:'実績/Kitten計画',
+            researchPlan:'Research解禁計画', fallbackBuilding:'施設Fallback', fallbackUpgrade:'Upgrade Fallback'
+        })[type] || type;
+    }
+
+    function updateUnlockPanel() {
+        const el = document.getElementById('ccUnlockStatus');
+        if (!el) return;
+        lastUnlockGoals = buildUnlockGoals();
+        if (!settings.unlockPlanner) { el.innerHTML = '<div class="cc-auto-muted">OFF</div>'; return; }
+        if (!lastUnlockGoals.length) { el.innerHTML = '<div class="cc-auto-green">主要な未達Unlock目標なし</div>'; return; }
+        el.innerHTML = lastUnlockGoals.slice(0, 8).map((g) => `<div><span class="cc-auto-yellow">${escapeHtml(g.category)}</span>：${escapeHtml(g.text)}</div>`).join('');
+    }
+
+    function updateAscendPanel() {
+        const el = document.getElementById('ccAscendStatus');
+        if (!el) return;
+        if (!settings.ascendAdvisor) { el.innerHTML = '<div class="cc-auto-muted">OFF</div>'; return; }
+        const a = getAscendAdvice();
+        if (!a) { el.innerHTML = '<div class="cc-auto-muted">判定不可</div>'; return; }
+        const cls = a.level === 'strong' ? 'cc-auto-green' : (a.level === 'consider' ? 'cc-auto-yellow' : 'cc-auto-muted');
+        el.innerHTML = `<div class="${cls}"><strong>${escapeHtml(a.message)}</strong></div><div>現在Prestige：約 ${pretty(a.currentPrestige)}</div><div>今Ascend時：約 +${pretty(a.gain)} → ${pretty(a.potentialPrestige)}</div>`;
+    }
+
+    function updatePanel() {
+        if (!panel || !Game) return;
+        const status = document.getElementById('ccAutoStatus');
+        if (!status) return;
+
+        const wrinks = activeWrinklers();
+        let html = settings.master ? '<div class="cc-auto-green">● 稼働中</div>' : '<div class="cc-auto-red">■ 停止中</div>';
+        html += `<div>表示CpS：${pretty(Game.cookiesPs)}</div>`;
+        html += `<div>自動クリック生産：約 ${pretty(clickIncome())}/秒（${pretty(currentMouseCps())} × ${clickRateForScoring().toFixed(0)}回）</div>`;
+        html += `<div>現金化速度：約 ${pretty(liquidIncome())}/秒</div>`;
+        html += `<div>長期経済速度：約 ${pretty(economicIncome())}/秒</div>`;
+        html += `<div>所持：${pretty(Game.cookies)}</div>`;
+        html += `<div>コンボ判定：${isMajorComboActive() ? '<span class="cc-auto-yellow">明示Buffあり</span>' : '通常'}</div>`;
+        html += `<div class="cc-auto-yellow">戦略状態：<strong>${escapeHtml(strategyState)}</strong></div>`;
+        html += `<div class="cc-auto-small">目的：${escapeHtml(strategyReason)}</div>`;
+
+        if (wrinks.length) html += `<div>Wrinkler：${wrinks.length}匹 / 虫銀行 約${pretty(totalWrinklerBank(true))}</div>`;
+        if (getReserve() > 0) html += `<div>戦略保護額：${pretty(getReserve())} / 使用可能：${pretty(spendableCookies())}</div>`;
+
+        html += `<div class="cc-auto-small">購入：${escapeHtml(lastActionText)}</div>`;
+        html += `<div class="cc-auto-small">魔法：${escapeHtml(lastSpellText)}</div>`;
+        html += `<div class="cc-auto-small">虫：${escapeHtml(lastWrinklerText)}</div>`;
+        html += '<hr><div class="cc-auto-yellow">購入エンジン診断</div>';
+        html += `<div>実行版：v${escapeHtml(VERSION)} / 単一起動：${PageWindow[RUNTIME_KEY] === runtime ? '<span class="cc-auto-green">有効</span>' : '<span class="cc-auto-red">無効</span>'}</div>`;
+        try {
+            const foundation = [0, 1, 2].map((id) => {
+                const up = Game.UpgradesById && Game.UpgradesById[id];
+                if (!up) return `ID${id}:未検出`;
+                return `ID${id}:${up.bought ? '購入済' : (up.unlocked ? `購入可能(${pretty(upgradePrice(up))})` : '未解禁')}`;
+            }).join(' / ');
+            html += `<div class="cc-auto-small">クリック基盤：${escapeHtml(foundation)}</div>`;
+        } catch (_) {}
+        html += `<div>ループ：${purchaseDiag.loops}回 / 最終 ${escapeHtml(purchaseDiag.lastRun)}</div>`;
+        html += `<div>通常候補：${purchaseDiag.currentCount}件 / 今買える：<strong>${purchaseDiag.affordableCount}件</strong></div>`;
+        html += `<div>Fallbackで今買える：${purchaseDiag.fallbackAffordableCount}件 / 解禁計画：${purchaseDiag.futureCount}件</div>`;
+        html += `<div>所持金では購入可能：${purchaseDiag.rawAffordableCount}件 / 保護額で遮断：${purchaseDiag.reserveBlockedCount}件</div>`;
+        html += `<div>連続未購入：${consecutiveNoPurchase}周期 / 最終購入：${lastPurchaseSuccessAt ? new Date(lastPurchaseSuccessAt).toLocaleTimeString() : '-'}</div>`;
+        if (reservedUpgrade.name) html += `<div class="cc-auto-green">購入目標：<strong>${escapeHtml(reservedUpgrade.name)}</strong></div>`;
+        if (boundedWaitGuard.key) {
+            const waitMaxCycles = lastDecision && finite(lastDecision.waitMaxCycles, 0) > 0
+                ? finite(lastDecision.waitMaxCycles, 1)
+                : Math.max(1, Math.floor(finite(settings.boundedWaitMaxCycles, 100)));
+            html += `<div>適応型待機：${boundedWaitGuard.cycles}/${waitMaxCycles}周期</div>`;
+        }
+        html += `<div>Target / Chain ETA目標：${purchaseDiag.etaTargetsEvaluated}件</div>`;
+        html += `<div>Beam Search：深さ${purchaseDiag.beamDepth} / 展開${purchaseDiag.beamExpanded}件</div>`;
+        if (purchaseDiag.beamTimedOut) html += '<div class="cc-auto-small cc-auto-yellow">計算時間上限で探索を打ち切り、得られた最良計画を使用</div>';
+        if (purchaseDiag.beamPlan && purchaseDiag.beamPlan !== '-') html += `<div class="cc-auto-small">計画：${escapeHtml(purchaseDiag.beamPlan)}</div>`;
+        if (purchaseDiag.etaSaved > 0) {
+            html += `<div class="cc-auto-green">${escapeHtml(purchaseDiag.etaKind)}：${escapeHtml(purchaseDiag.etaCandidate)} → ${escapeHtml(purchaseDiag.etaTarget)}</div>`;
+            html += `<div class="cc-auto-small">直接 ${formatSeconds(purchaseDiag.etaDirect)} → 先に購入 ${formatSeconds(purchaseDiag.etaVia)} / 約${formatSeconds(purchaseDiag.etaSaved)}短縮 (${(purchaseDiag.etaSavedRatio * 100).toFixed(1)}%)</div>`;
+        }
+        html += `<div>判断：${escapeHtml(purchaseDiag.decision)}</div>`;
+        html += `<div>選択：${escapeHtml(purchaseDiag.selected)} / 試行 ${purchaseDiag.attempts}件</div>`;
+        html += `<div>最終成功：${escapeHtml(purchaseDiag.lastSuccess)}</div>`;
+        if (purchaseDiag.pausedReason) html += `<div class="cc-auto-yellow">停止理由：${escapeHtml(purchaseDiag.pausedReason)}</div>`;
+        if (lastPurchaseError) html += `<div class="cc-auto-red cc-auto-small">直近購入エラー：${escapeHtml(lastPurchaseError)}</div>`;
+
+        if (lastDecision) {
+            const need = Math.max(finite(lastDecision.immediatePrice, 0) - spendableCookies(), 0);
+            html += '<hr><div class="cc-auto-yellow">現在の判断</div>';
+            html += `<div><strong>${escapeHtml(lastDecision.name)}</strong></div>`;
+            html += `<div>種別：${escapeHtml(typeLabel(lastDecision.type))}</div>`;
+            html += `<div>理由：${escapeHtml(lastDecision.reason)}</div>`;
+            html += `<div>次の支出：${pretty(lastDecision.immediatePrice)}</div>`;
+            if (lastDecision.price !== lastDecision.immediatePrice && Number.isFinite(lastDecision.price)) html += `<div>計画総額：約 ${pretty(lastDecision.price)}</div>`;
+            if (Number.isFinite(lastDecision.score)) html += `<div>評価時間：約 ${formatSeconds(lastDecision.score)}</div>`;
+            if (lastDecision.upgradeValueModel) html += `<div>Upgrade評価：${escapeHtml(lastDecision.upgradeValueModel)} / 確信度 ${(finite(lastDecision.upgradeValueConfidence, 0) * 100).toFixed(0)}%</div>`;
+            if (Number.isFinite(lastDecision.horizonValueSeconds)) html += `<div>複数期間の資産効果：${lastDecision.horizonValueSeconds >= 0 ? '+' : ''}${formatSeconds(lastDecision.horizonValueSeconds)}</div>`;
+            if (finite(lastDecision.etaSavedSeconds, 0) > 0) {
+                html += `<div class="cc-auto-green">Target ETA：${escapeHtml(lastDecision.etaTargetName)}へ約${formatSeconds(lastDecision.etaSavedSeconds)}早く到達</div>`;
+            }
+            html += need > 0
+                ? `<div class="cc-auto-yellow">貯蓄中：あと ${pretty(need)}（約${formatSeconds(need / liquidIncome())}）</div>`
+                : '<div class="cc-auto-green">実行可能</div>';
+        }
+
+        if (lastCandidates.length) {
+            html += '<div class="cc-auto-plan"><div class="cc-auto-small">上位候補</div>';
+            lastCandidates.slice(0, 5).forEach((c, i) => {
+                const etaMark = finite(c.etaSavedSeconds, 0) > 0 ? ` / ETA短縮 ${formatSeconds(c.etaSavedSeconds)}` : '';
+                const horizonMark = Number.isFinite(c.horizonValueSeconds) && Math.abs(c.horizonValueSeconds) >= 0.1 ? ` / 将来 ${c.horizonValueSeconds >= 0 ? '+' : ''}${formatSeconds(c.horizonValueSeconds)}` : '';
+                html += `<div>${i + 1}. ${escapeHtml(c.name)} <span class="cc-auto-small">[${escapeHtml(typeLabel(c.type))}] ${Number.isFinite(c.score) ? formatSeconds(c.score) : '-'}${etaMark}${horizonMark}</span></div>`;
+            });
+            html += '</div>';
+        }
+
+        status.innerHTML = html;
+        updateUnlockPanel();
+        updateAscendPanel();
+    }
+
+    waitForGame();
+})();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
