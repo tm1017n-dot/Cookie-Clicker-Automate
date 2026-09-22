@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, ENGINE_VERSION } from '../core/contracts.mjs';
+import { DEFAULT_CONFIG } from '../core/contracts.mjs';
 import { plan } from '../core/planner.mjs';
 import { Executor } from './executor.mjs';
 import { bundle, Diagnostics } from './diagnostics.mjs';
@@ -7,7 +7,7 @@ export const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 export class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version=ENGINE_VERSION;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.2';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -33,8 +33,17 @@ export class Coordinator {
   async tick(){
     if(!this.owns() || this.running || this.adapter.fault || this.error==='purchase-result-unresolved')return;
     this.running=true;
+    const generation=this.generation,observeOnly=this.config.observeOnly;
+    const elapsed=()=>globalThis.performance.now();
+    const started=elapsed();
     try{
       this.error=null;
+      const runIdentity=this.adapter.runIdentity();
+      if(this.runIdentity!==undefined && this.runIdentity!==runIdentity){
+        this.commitment=null;this.executor=new Executor(this.adapter,()=>this.owns(),this.clock);
+        this.started=this.clock();this.clicks=[];
+      }
+      this.runIdentity=runIdentity;
       const pending=this.executor.poll();
       if(pending){
         if(pending.status==='pending')return;
@@ -42,13 +51,17 @@ export class Coordinator {
         if(pending.status==='unresolved')throw new Error('purchase-result-unresolved');
         if(pending.status==='confirmed' && this.commitment?.targetId===pending.actionId)this.commitment=null;
       }
-      const input=this.adapter.capture(this.config,this.commitment,this.config.autoClick?this.clickRate():0);
+      const input=this.adapter.capture(this.config,observeOnly?null:this.commitment,this.config.autoClick?this.clickRate():0);
+      const captured=elapsed();
       const decision=plan(input);
+      const planned=elapsed();
       const record=await bundle(input,decision,this.token+':'+(++this.cycle));
+      record.runtimeVersion=this.version;
+      record.timings={captureMs:captured-started,plannerMs:planned-captured};
       await this.diagnostics.save(record);
-      if(!this.owns())return;
-      this.commitment=decision.nextCommitment;
-      if(!this.config.observeOnly){
+      if(!this.owns() || generation!==this.generation)return;
+      if(!observeOnly){
+        this.commitment=decision.nextCommitment;
         record.receipt=this.executor.execute(decision,input,record.cycleId);
         if(record.receipt.status==='confirmed' && this.commitment?.targetId===record.receipt.actionId)this.commitment=null;
         // An exception stops just this purchase cycle; the next cycle recaptures unless restore failed.
@@ -59,6 +72,10 @@ export class Coordinator {
     }catch(error){
       this.error=String(error.message);
     }finally{this.running=false;this.onUpdate(this);}
+  }
+  setObserveOnly(value){
+    if(this.config.observeOnly===value)return;
+    this.generation++;this.config.observeOnly=value;this.commitment=null;this.last=null;this.resume();
   }
   resume(){this.error=null;this.started=this.clock();this.clicks=[];this.onUpdate(this);}
   shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}

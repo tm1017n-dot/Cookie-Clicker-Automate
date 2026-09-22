@@ -21,3 +21,33 @@ test('lost ownership denies even a valid purchase',()=>{const {a,input,d}=setup(
 test('RUN-01 and RUN-02 shutdown/token ownership for reinjection',async()=>{const page={},g=mockGame();let shutdown=0;page[RUNTIME_KEY]={shutdown(){shutdown++;}};const r1=new Coordinator(page,new GameAdapter(()=>g));await r1.start({timers:false});const r2=new Coordinator(page,new GameAdapter(()=>g));await r2.start({timers:false});assert.equal(shutdown,1);assert.equal(r1.owns(),false);assert.equal(r2.owns(),true);r1.clickTick();assert.equal(g.cookieClicks,0);r2.shutdown();});
 test('LOG-02 storage failure prevents purchase',async()=>{const g=mockGame();g.cookies=100;const diagnostics=new Diagnostics();diagnostics.save=async()=>{throw new Error('quota');};const r=new Coordinator({},new GameAdapter(()=>g),{config:{observeOnly:false},diagnostics});await r.start({timers:false});await r.tick();assert.equal(g.UpgradesById[0].bought,0);assert.equal(r.error,'quota');r.shutdown();});
 test('REC-03 API capture error is retried next cycle without buying',async()=>{const g=mockGame();g.ready=false;const r=new Coordinator({},new GameAdapter(()=>g));await r.start({timers:false});await r.tick();assert.equal(r.error,'game-not-ready');g.ready=true;await r.tick();assert.equal(r.error,null);assert.ok(r.last);r.shutdown();});
+
+test('observation never establishes an execution reservation',async()=>{
+ const g=mockGame(),r=new Coordinator({},new GameAdapter(()=>g));await r.start({timers:false});await r.tick();
+ assert.ok(r.last.decision.nextCommitment);assert.equal(r.commitment,null);r.shutdown();
+});
+test('switching modes invalidates an in-flight observation before execution',async()=>{
+ const g=mockGame();g.cookies=100;const d=new Diagnostics();let release,entered;
+ const waiting=new Promise(resolve=>entered=resolve);d.save=async()=>{entered();await new Promise(resolve=>release=resolve);};
+ const r=new Coordinator({},new GameAdapter(()=>g),{diagnostics:d});await r.start({timers:false});
+ const tick=r.tick();await waiting;r.setObserveOnly(false);release();await tick;
+ assert.equal(g.UpgradesById[0].bought,0);assert.equal(r.commitment,null);r.shutdown();
+});
+test('journal does not redefine unchanged properties',async()=>{
+ const {Journal}=await import('../src/game/journal.mjs');let writes=0;
+ const object=new Proxy({a:1,b:2},{defineProperty(target,key,descriptor){writes++;return Reflect.defineProperty(target,key,descriptor);}});
+ const journal=new Journal([object]);journal.restore();assert.equal(writes,0);
+ object.a=3;writes=0;journal.restore();assert.equal(writes,1);assert.equal(object.a,1);
+});
+test('new save invalidates the previous save reservation',async()=>{
+ const g=mockGame();g.startDate=1;g.fullDate=1;g.cookies=0;
+ const r=new Coordinator({},new GameAdapter(()=>g),{config:{observeOnly:false}});await r.start({timers:false});await r.tick();
+ r.commitment={targetId:'building:8',status:'saving'};g.startDate=2;g.fullDate=2;
+ await r.tick();assert.notEqual(r.commitment?.targetId,'building:8');assert.notEqual(r.last.decision.reasonCode,'WAIT_TARGET_UNAVAILABLE');r.shutdown();
+});
+test('measurement restores nested production summary maps',()=>{
+ const g=mockGame();g.cookiesPsByType={Cursor:123};g.cookiesMultByType={kittens:456};const calculate=g.CalculateGains;
+ g.CalculateGains=()=>{calculate();g.cookiesPsByType.Cursor=999;g.cookiesMultByType.kittens=888;};
+ new GameAdapter(()=>g).capture(DEFAULT_CONFIG);
+ assert.deepEqual(g.cookiesPsByType,{Cursor:123});assert.deepEqual(g.cookiesMultByType,{kittens:456});
+});

@@ -5,8 +5,11 @@ import { effectDelta } from '../core/model.mjs';
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
 const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.UpgradesInStore,
-  g.buffs, g.effs, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
+  g.buffs, g.effs, g.cookiesPsByType, g.cookiesMultByType, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
   ...collection(g.AchievementsById), ...Object.values(g.buffs || {}), ...collection(g.wrinklers)];
+// Audited CalculateGains 2.058 writes root caches, these two maps and building caches.
+// Win/Unlock are disabled during measurement; only the explicitly changed upgrade is writable.
+const gainsObjects=(g,touched)=>[g,g.cookiesPsByType,g.cookiesMultByType,...collection(g.ObjectsById),...touched];
 
 export class GameAdapter {
   constructor(getGame, { supportedVersions = ['2.058'] } = {}) {
@@ -20,10 +23,10 @@ export class GameAdapter {
     if (g.ascensionMode) throw new Error('unsupported-ascension-mode');
     if (Object.keys(g.mods || {}).length || Object.values(g.modHooks || {}).some(x => Array.isArray(x) && x.length)) throw new Error('unreviewed-mod-hooks');
   }
-  measure(change) {
+  measure(change, touched = null) {
     if (this.busy || this.fault) throw new Error(this.fault || 'adapter-busy');
     this.audit();
-    const g = this.game, journal = new Journal(objects(g));
+    const g = this.game, journal = new Journal(touched===null?objects(g):gainsObjects(g,touched));
     this.busy = true;
     try {
       g.Win = () => {}; g.Unlock = () => {};
@@ -47,9 +50,10 @@ export class GameAdapter {
     const g = this.game;
     return action.operation === 'buyBuilding' ? g.ObjectsById[action.targetId]?.amount : g.UpgradesById[action.targetId]?.bought;
   }
+  runIdentity() { const g=this.game; return JSON.stringify([g.startDate??null,g.fullDate??null,g.resets??0]); }
   signature() {
     const g = this.game;
-    return JSON.stringify({ buildings:collection(g.ObjectsById).map(b => [b.id,b.amount,b.level]),
+    return JSON.stringify({ run:this.runIdentity(),buildings:collection(g.ObjectsById).map(b => [b.id,b.amount,b.level]),
       upgrades:collection(g.UpgradesById).filter(u => u.bought).map(u => u.id),
       buffs:Object.values(g.buffs || {}).map(b => [b.name,b.multCpS ?? 1,b.multClick ?? 1]),
       season:g.season ?? '', dragon:[g.dragonAura ?? 0,g.dragonAura2 ?? 0],
@@ -65,9 +69,9 @@ export class GameAdapter {
     const buffs = Object.values(g.buffs || {}).map(b => ({ id:b.id ?? b.name, remaining:Math.max(0,b.time/g.fps),
       passive:b.multCpS ?? 1,click:b.multClick ?? 1 }));
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
-    const steady = this.measure(x => { x.buffs = {}; });
+    const steady = this.measure(x => { x.buffs = {}; }, []);
     // Derive CpS-linked mouse contribution from the live formula, without invoking a click.
-    const journal = new Journal(objects(g));
+    const journal = new Journal(gainsObjects(g,[]));
     let fraction;
     try {
       g.buffs = {}; g.CalculateGains();
@@ -78,7 +82,7 @@ export class GameAdapter {
     const buildings = collection(g.ObjectsById).map(b => {
       const price = this.price('building',b.id);
       const unit = Math.max(0,(b.storedCps ?? (b.amount ? b.storedTotalCps/b.amount : 0)) * steady.global);
-      const measured = this.measure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; });
+      const measured = this.measure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; }, []);
       const passiveDelta = measured.passive - steady.passive;
       const clickDelta = measured.mouse - steady.mouse;
       const residual = clickDelta - fraction*passiveDelta;
@@ -93,7 +97,7 @@ export class GameAdapter {
     const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2)).map(u => {
       const price = this.price('upgrade',u.id);
       const disallowed = ['prestige','debug','toggle'].includes(u.pool) || Boolean(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask);
-      const measured = this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; });
+      const measured = this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
       const passiveDelta = measured.passive-steady.passive, mouseDelta = measured.mouse-steady.mouse;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }

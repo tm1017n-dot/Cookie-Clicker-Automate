@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.1
+// @version 9.0.0-alpha.2
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
-// @grant unsafeWindow
+// @grant none
 // @run-at document-idle
 // ==/UserScript==
 (function(){'use strict';const factories={
@@ -37,8 +37,11 @@ const { effectDelta }=require("src/core/model.mjs");
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
 const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.UpgradesInStore,
-  g.buffs, g.effs, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
+  g.buffs, g.effs, g.cookiesPsByType, g.cookiesMultByType, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
   ...collection(g.AchievementsById), ...Object.values(g.buffs || {}), ...collection(g.wrinklers)];
+// Audited CalculateGains 2.058 writes root caches, these two maps and building caches.
+// Win/Unlock are disabled during measurement; only the explicitly changed upgrade is writable.
+const gainsObjects=(g,touched)=>[g,g.cookiesPsByType,g.cookiesMultByType,...collection(g.ObjectsById),...touched];
 
 class GameAdapter {
   constructor(getGame, { supportedVersions = ['2.058'] } = {}) {
@@ -52,10 +55,10 @@ class GameAdapter {
     if (g.ascensionMode) throw new Error('unsupported-ascension-mode');
     if (Object.keys(g.mods || {}).length || Object.values(g.modHooks || {}).some(x => Array.isArray(x) && x.length)) throw new Error('unreviewed-mod-hooks');
   }
-  measure(change) {
+  measure(change, touched = null) {
     if (this.busy || this.fault) throw new Error(this.fault || 'adapter-busy');
     this.audit();
-    const g = this.game, journal = new Journal(objects(g));
+    const g = this.game, journal = new Journal(touched===null?objects(g):gainsObjects(g,touched));
     this.busy = true;
     try {
       g.Win = () => {}; g.Unlock = () => {};
@@ -79,9 +82,10 @@ class GameAdapter {
     const g = this.game;
     return action.operation === 'buyBuilding' ? g.ObjectsById[action.targetId]?.amount : g.UpgradesById[action.targetId]?.bought;
   }
+  runIdentity() { const g=this.game; return JSON.stringify([g.startDate??null,g.fullDate??null,g.resets??0]); }
   signature() {
     const g = this.game;
-    return JSON.stringify({ buildings:collection(g.ObjectsById).map(b => [b.id,b.amount,b.level]),
+    return JSON.stringify({ run:this.runIdentity(),buildings:collection(g.ObjectsById).map(b => [b.id,b.amount,b.level]),
       upgrades:collection(g.UpgradesById).filter(u => u.bought).map(u => u.id),
       buffs:Object.values(g.buffs || {}).map(b => [b.name,b.multCpS ?? 1,b.multClick ?? 1]),
       season:g.season ?? '', dragon:[g.dragonAura ?? 0,g.dragonAura2 ?? 0],
@@ -97,9 +101,9 @@ class GameAdapter {
     const buffs = Object.values(g.buffs || {}).map(b => ({ id:b.id ?? b.name, remaining:Math.max(0,b.time/g.fps),
       passive:b.multCpS ?? 1,click:b.multClick ?? 1 }));
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
-    const steady = this.measure(x => { x.buffs = {}; });
+    const steady = this.measure(x => { x.buffs = {}; }, []);
     // Derive CpS-linked mouse contribution from the live formula, without invoking a click.
-    const journal = new Journal(objects(g));
+    const journal = new Journal(gainsObjects(g,[]));
     let fraction;
     try {
       g.buffs = {}; g.CalculateGains();
@@ -110,7 +114,7 @@ class GameAdapter {
     const buildings = collection(g.ObjectsById).map(b => {
       const price = this.price('building',b.id);
       const unit = Math.max(0,(b.storedCps ?? (b.amount ? b.storedTotalCps/b.amount : 0)) * steady.global);
-      const measured = this.measure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; });
+      const measured = this.measure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; }, []);
       const passiveDelta = measured.passive - steady.passive;
       const clickDelta = measured.mouse - steady.mouse;
       const residual = clickDelta - fraction*passiveDelta;
@@ -125,7 +129,7 @@ class GameAdapter {
     const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2)).map(u => {
       const price = this.price('upgrade',u.id);
       const disallowed = ['prestige','debug','toggle'].includes(u.pool) || Boolean(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask);
-      const measured = this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; });
+      const measured = this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
       const passiveDelta = measured.passive-steady.passive, mouseDelta = measured.mouse-steady.mouse;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
@@ -271,6 +275,8 @@ Object.assign(exports,{ENGINE_VERSION,RULESET_VERSION,DEFAULT_CONFIG,clone,epsil
 },
 "src/game/journal.mjs":function(require,exports){
 // Preserve descriptors as well as values: game functions and collection identities matter.
+const fields=['value','get','set','writable','enumerable','configurable'];
+const same=(a,b)=>a && b && fields.every(field=>Object.is(a[field],b[field]));
 class Journal {
   constructor(objects) {
     this.entries = [...new Set(objects.filter(x => x && typeof x === 'object'))].map(object => ({ object, descriptors: Object.getOwnPropertyDescriptors(object) }));
@@ -280,13 +286,15 @@ class Journal {
       for (const key of Reflect.ownKeys(object)) if (!(key in descriptors)) {
         if (!Reflect.deleteProperty(object,key)) throw new Error('restore-delete-failed:' + String(key));
       }
-      Object.defineProperties(object,descriptors);
+      for(const key of Reflect.ownKeys(descriptors)) {
+        if(!same(Object.getOwnPropertyDescriptor(object,key),descriptors[key]))Object.defineProperty(object,key,descriptors[key]);
+      }
     }
     for (const { object, descriptors } of this.entries) {
       const actual = Object.getOwnPropertyDescriptors(object);
       if (Reflect.ownKeys(actual).length !== Reflect.ownKeys(descriptors).length) throw new Error('restore-key-mismatch');
       for (const key of Reflect.ownKeys(descriptors)) {
-        for (const field of ['value','get','set','writable','enumerable','configurable'])
+        for (const field of fields)
           if (!Object.is(actual[key]?.[field],descriptors[key][field])) throw new Error('restore-value-mismatch:' + String(key));
       }
     }
@@ -411,7 +419,7 @@ function effectDelta(s, offer) {
 Object.assign(exports,{income,buildingPrice,eligible,allOffers,applyEffect,applyAction,advance,eta,effectDelta});
 },
 "src/runtime/coordinator.mjs":function(require,exports){
-const { DEFAULT_CONFIG, ENGINE_VERSION }=require("src/core/contracts.mjs");
+const { DEFAULT_CONFIG }=require("src/core/contracts.mjs");
 const { plan }=require("src/core/planner.mjs");
 const { Executor }=require("src/runtime/executor.mjs");
 const { bundle, Diagnostics }=require("src/runtime/diagnostics.mjs");
@@ -420,7 +428,7 @@ const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version=ENGINE_VERSION;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.2';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -446,8 +454,17 @@ class Coordinator {
   async tick(){
     if(!this.owns() || this.running || this.adapter.fault || this.error==='purchase-result-unresolved')return;
     this.running=true;
+    const generation=this.generation,observeOnly=this.config.observeOnly;
+    const elapsed=()=>globalThis.performance.now();
+    const started=elapsed();
     try{
       this.error=null;
+      const runIdentity=this.adapter.runIdentity();
+      if(this.runIdentity!==undefined && this.runIdentity!==runIdentity){
+        this.commitment=null;this.executor=new Executor(this.adapter,()=>this.owns(),this.clock);
+        this.started=this.clock();this.clicks=[];
+      }
+      this.runIdentity=runIdentity;
       const pending=this.executor.poll();
       if(pending){
         if(pending.status==='pending')return;
@@ -455,13 +472,17 @@ class Coordinator {
         if(pending.status==='unresolved')throw new Error('purchase-result-unresolved');
         if(pending.status==='confirmed' && this.commitment?.targetId===pending.actionId)this.commitment=null;
       }
-      const input=this.adapter.capture(this.config,this.commitment,this.config.autoClick?this.clickRate():0);
+      const input=this.adapter.capture(this.config,observeOnly?null:this.commitment,this.config.autoClick?this.clickRate():0);
+      const captured=elapsed();
       const decision=plan(input);
+      const planned=elapsed();
       const record=await bundle(input,decision,this.token+':'+(++this.cycle));
+      record.runtimeVersion=this.version;
+      record.timings={captureMs:captured-started,plannerMs:planned-captured};
       await this.diagnostics.save(record);
-      if(!this.owns())return;
-      this.commitment=decision.nextCommitment;
-      if(!this.config.observeOnly){
+      if(!this.owns() || generation!==this.generation)return;
+      if(!observeOnly){
+        this.commitment=decision.nextCommitment;
         record.receipt=this.executor.execute(decision,input,record.cycleId);
         if(record.receipt.status==='confirmed' && this.commitment?.targetId===record.receipt.actionId)this.commitment=null;
         // An exception stops just this purchase cycle; the next cycle recaptures unless restore failed.
@@ -472,6 +493,10 @@ class Coordinator {
     }catch(error){
       this.error=String(error.message);
     }finally{this.running=false;this.onUpdate(this);}
+  }
+  setObserveOnly(value){
+    if(this.config.observeOnly===value)return;
+    this.generation++;this.config.observeOnly=value;this.commitment=null;this.last=null;this.resume();
   }
   resume(){this.error=null;this.started=this.clock();this.clicks=[];this.onUpdate(this);}
   shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
@@ -710,17 +735,19 @@ function mountPanel(runtime,document){
   const status=document.createElement('pre');status.style.cssText='white-space:pre-wrap;font:inherit';root.append(status);
   const controls=document.createElement('div');root.append(controls);
   function button(label,handler){const b=document.createElement('button');b.textContent=label;b.style.cssText='margin:3px;padding:4px 7px;cursor:pointer';b.onclick=handler;controls.append(b);return b;}
-  const mode=button('自動化を開始',()=>{runtime.config.observeOnly=!runtime.config.observeOnly;runtime.resume();render();});
+  const mode=button('自動化を開始',()=>{runtime.setObserveOnly(!runtime.config.observeOnly);runtime.tick();render();});
   button('診断JSON',async()=>{try{const records=await runtime.diagnostics.exportAll();const blob=new Blob([JSON.stringify(records,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='cookie-auto-diagnostics.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){runtime.error=e.message;render();}});
   button('再観測',()=>{runtime.resume();runtime.tick();});
   button('予約解除',()=>{runtime.commitment=null;runtime.tick();});
   button('停止',()=>runtime.shutdown());
   const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='候補と判断の詳細';details.append(summary);
   const text=document.createElement('pre');text.style.cssText='white-space:pre-wrap;font-size:11px';details.append(text);root.append(details);
+  let renderedDecision=null;
+  details.ontoggle=()=>render();
   function render(){
     const d=runtime.last?.decision;
     status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n単一起動：${runtime.owns()?'有効':'所有権なし'}\n${runtime.error?'診断：'+runtime.error:d?d.reasonCode+' / '+d.selectedAction.id:'ゲーム状態を確認中'}\n予約：${runtime.commitment?.targetId??'なし'}\n実クリック：約${runtime.clickRate().toFixed(1)}回/秒\n基本購入版：ミニゲーム自動操作は未対応`;
-    text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,candidates:d.allCandidates,warnings:d.warnings},null,2):'';
+    if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}
     mode.textContent=runtime.config.observeOnly?'自動化を開始':'観測モードへ';mode.disabled=runtime.stopped;
   }
   const previous=runtime.onUpdate;runtime.onUpdate=r=>{previous(r);if(runtime.stopped)root.remove();else render();};
