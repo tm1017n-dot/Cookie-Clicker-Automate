@@ -76,4 +76,18 @@ Tampermonkey上でCookie Clickerを自動プレイし、単純な最安購入や
 4. Game非依存の純粋な購入プランナーを新規作成する。
 5. v8.5からUI操作、Gameアダプター、各ミニゲーム操作だけを段階的に移植する。
 
+## 9. 2026-09-23 詳細設計の追加
 
+実装前の [詳細設計パッケージ](rebuild/README.md) を追加した。次の実装では [DELIVERY](rebuild/DELIVERY.md) のM1から開始する。
+
+- Game/DOM非依存のPlanner、単一Executor、版付きJSON契約を定義。
+- 期待資産と資金ETAを分離し、クリック・未回収資産・累計生産を区別。
+- 時間イベント、解禁経路、GC/魔法/ミニゲーム/転生の攻略設計を追加。
+- [VALIDATION](rebuild/VALIDATION.md) に既存全fixtureと報告9件の対応、追加試験、実画面合格条件を記載。
+- 公式main.jsとミニゲーム公開ソースを調査し、出典と取得ハッシュを [STRATEGY](rebuild/STRATEGY.md) に記録。
+
+状態は文書作成のみ。新エンジン、実行可能fixture、schema validator、実画面由来スナップショット、改善ベンチマークは未作成/未実施。報告当時の完全状態はなく、合成fixtureと実画面記録を区別する。旧版の問題が修正済みになったわけではない。
+
+## 10. 既知の設計課題
+
+評価期間・リスク係数・探索上限の調整、仮想状態復元の副作用監査、未知Upgrade、予約の自動再目標化、実行時ゲーム版/Mod対応は未検証。[DELIVERY](rebuild/DELIVERY.md) の確認項目に従い、無根拠の購入Fallbackで回避しない。
