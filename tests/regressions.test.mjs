@@ -15,6 +15,13 @@ for(const [id,options,expected,target] of [
   ['OPEN-26',{cursors:26,owned:[0],bank:500},'upgrade:1']
 ])test(id,()=>{const r=plan(opening(options));assert.equal(r.selectedAction.id,expected);if(target)assert.equal(r.nextCommitment.targetId,target);});
 test('LANG-01 / MODEL-03 language and labels never change selected action',()=>{const a=clone(opening({cursors:1,owned:[0]})),b=clone(a);a.environment.language='en';b.environment.language='ja';for(const o of b.state.offers){o.displayName='日本語';o.description='2倍';}assert.deepEqual(plan(a).selectedAction,plan(b).selectedAction);});
+test('opening is economic, not a mandatory Cursor sequence',()=>{
+ assert.equal(plan(opening({bank:100,clickRate:0})).selectedAction.id,'building:1');
+ assert.equal(plan(opening({bank:100,clickRate:100})).selectedAction.id,'building:0');
+});
+test('zero-income fresh save has no prescribed opening reservation',()=>{
+ const result=plan(opening({bank:0,clickRate:0}));assert.equal(result.selectedAction.kind,'wait');assert.equal(result.nextCommitment,null);
+});
 for(const [id,n,base,price,unit,expected] of [
  ['GRAND-10',10,100,5000,1,'building'],['GRAND-11',11,100,5000,1,'upgrade'],
  ['FACT-05',5,130000,6500000,260,'building'],['FACT-11',11,130000,6500000,260,'upgrade']

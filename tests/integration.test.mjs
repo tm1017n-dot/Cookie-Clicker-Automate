@@ -8,6 +8,26 @@ import { Coordinator,RUNTIME_KEY } from '../src/runtime/coordinator.mjs';
 import { Diagnostics } from '../src/runtime/diagnostics.mjs';
 import { plan } from '../src/core/planner.mjs';
 function setup(){const g=mockGame();g.cookies=100;const a=new GameAdapter(()=>g),input=a.capture(DEFAULT_CONFIG,{targetId:'upgrade:0',status:'ready'}),d=plan(input);return {g,a,input,d};}
+test('100Hz automation uses the normal handler despite the game cooldown',()=>{
+ const g=mockGame(),a=new GameAdapter(()=>g);g.lastClick=Date.now()+100;
+ g.ClickCookie=()=>{if(Date.now()-g.lastClick<20)return;g.cookieClicks++;g.cookies+=1;g.lastClick=Date.now();};
+ assert.equal(a.click(50),false);assert.equal(a.click(100),true);assert.equal(g.cookieClicks,1);assert.equal(g.cookies,1);
+});
+test('rejected high rate click preserves cooldown and click count',()=>{
+ const g=mockGame(),a=new GameAdapter(()=>g);g.lastClick=Date.now();const before=g.lastClick;g.ClickCookie=()=>{};
+ assert.equal(a.click(100),false);assert.equal(g.lastClick,before);assert.equal(g.cookieClicks,0);
+});
+test('click scheduling respects rate changes and never catches up in bursts',async()=>{
+ const g=mockGame();let now=0;const r=new Coordinator({},new GameAdapter(()=>g),{config:{observeOnly:false},clock:()=>now});await r.start({timers:false});
+ for(now=0;now<1000;now+=10)r.clickTick();assert.equal(g.cookieClicks,100);assert.equal(r.measuredClickRate(),100);
+ r.setClickRate(20);for(now=1000;now<2000;now+=10)r.clickTick();assert.equal(g.cookieClicks,120);assert.equal(r.clickRate(),20);
+ now=60000;r.clickTick();r.clickTick();assert.equal(g.cookieClicks,121);assert.throws(()=>r.setClickRate(101));r.shutdown();
+});
+test('startup income uses only successful clicks, never the configured target',async()=>{
+ const g=mockGame();let now=0;const r=new Coordinator({},new GameAdapter(()=>g),{clock:()=>now});await r.start({timers:false});
+ assert.equal(r.clickRate(),0);r.setObserveOnly(false);assert.equal(r.measuredClickRate(),0);assert.equal(r.clickRate(),0);
+ now=1000;assert.equal(r.clickRate(),0);r.shutdown();
+});
 test('real Game ID dictionaries are supported as well as arrays',()=>{const g=mockGame();g.UpgradesById=Object.fromEntries(g.UpgradesById.map(u=>[u.id,u]));g.mouseCps=()=>2**Object.values(g.UpgradesById).filter(u=>u.bought).length;g.AchievementsById={};assert.equal(new GameAdapter(()=>g).capture(DEFAULT_CONFIG).state.offers.length,3);});
 test('nonlinear click bonuses invalidate a reusable upgrade rule',()=>{const g=mockGame();g.mouseCps=()=>100+2**g.UpgradesById.filter(u=>u.bought).length;const offer=new GameAdapter(()=>g).capture(DEFAULT_CONFIG).state.offers[0];assert.equal(offer.rootOnly,true);assert.equal(offer.effect.flatClick,1);});
 test('SAFE-02 restoration failure permanently disables adapter writes',()=>{const g=mockGame(),a=new GameAdapter(()=>g);g.CalculateGains=()=>Object.defineProperty(g,'unexpected',{value:1,configurable:false});assert.throws(()=>a.measure(()=>{}));assert.match(a.fault,/reload-required/);assert.equal(a.click(),false);});
@@ -31,6 +51,13 @@ test('switching modes invalidates an in-flight observation before execution',asy
  const waiting=new Promise(resolve=>entered=resolve);d.save=async()=>{entered();await new Promise(resolve=>release=resolve);};
  const r=new Coordinator({},new GameAdapter(()=>g),{diagnostics:d});await r.start({timers:false});
  const tick=r.tick();await waiting;r.setObserveOnly(false);release();await tick;
+ assert.equal(g.UpgradesById[0].bought,0);assert.equal(r.commitment,null);r.shutdown();
+});
+test('releasing a reservation invalidates a purchase waiting for diagnostic storage',async()=>{
+ const g=mockGame();g.cookies=100;const d=new Diagnostics();let release,entered;const waiting=new Promise(resolve=>entered=resolve);
+ d.save=async()=>{entered();await new Promise(resolve=>release=resolve);};
+ const r=new Coordinator({},new GameAdapter(()=>g),{config:{observeOnly:false},diagnostics:d});await r.start({timers:false});
+ r.commitment={targetId:'upgrade:0',status:'ready'};const tick=r.tick();await waiting;r.clearCommitment();release();await tick;
  assert.equal(g.UpgradesById[0].bought,0);assert.equal(r.commitment,null);r.shutdown();
 });
 test('journal does not redefine unchanged properties',async()=>{

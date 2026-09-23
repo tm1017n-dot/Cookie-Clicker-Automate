@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.2
+// @version 9.0.0-alpha.3
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
 // @grant none
@@ -189,10 +189,15 @@ class GameAdapter {
       throw new Error('operation-not-enabled');
     } finally { this.busy=false; }
   }
-  click() {
+  click(requestedRate = 50) {
     if (this.busy || !this.playable()) return false;
     const g=this.game,before=g.cookieClicks;
-    g.ClickCookie(); return g.cookieClicks>before;
+    // Web 2.058 rejects calls less than 20ms apart. Permit the configured automation
+    // rate through the normal click handler; never multiply cookie rewards directly.
+    const lastClick=g.lastClick;
+    if(requestedRate>50 && Number.isFinite(lastClick))g.lastClick=Math.min(lastClick,Date.now()-20);
+    try { g.ClickCookie(); return g.cookieClicks>before; }
+    finally { if(g.cookieClicks===before && requestedRate>50 && Number.isFinite(lastClick))g.lastClick=lastClick; }
   }
   collect(config) {
     if (this.busy || !this.playable()) return 0;
@@ -210,7 +215,7 @@ const RULESET_VERSION = 'cc-web-2.058/basic-1';
 const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
-  clickRate: 20, purchaseIntervalMs: 1500, riskWeight: 0.1,
+  clickRate: 100, purchaseIntervalMs: 1500, riskWeight: 0.1,
   observeOnly: true, autoClick: true, collectGolden: true, collectWrath: false,
   allowSell: false, allowLumps: false, allowAscend: false
 });
@@ -428,7 +433,7 @@ const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.2';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.3';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -443,13 +448,20 @@ class Coordinator {
     if(!this.owns())return;
     if(timers){
       this.timers.push(setInterval(()=>this.tick(),this.config.purchaseIntervalMs));
-      this.timers.push(setInterval(()=>this.clickTick(),Math.max(20,1000/Math.max(1,this.config.clickRate))));
+      this.timers.push(setInterval(()=>this.clickTick(),10));
       this.timers.push(setInterval(()=>this.collectTick(),150));
     }
     this.onUpdate(this);
   }
-  clickRate(){const now=this.clock();this.clicks=this.clicks.filter(t=>now-t<=5000);return now-this.started<5000?this.config.clickRate:this.clicks.length/5;}
-  clickTick(){if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;try{if(this.adapter.click())this.clicks.push(this.clock());}catch(e){this.error=e.message;this.onUpdate(this);}}
+  measuredClickRate(){const now=this.clock();this.clicks=this.clicks.filter(t=>now-t<5000);return this.config.observeOnly || !this.config.autoClick?0:this.clicks.length/Math.max(.001,Math.min(5,(now-this.started)/1000));}
+  clickRate(){return this.measuredClickRate();}
+  clickTick(){
+    if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;
+    const now=this.clock();if(now<(this.nextClickAt??0))return;
+    // No catch-up burst after a stalled/background tab.
+    this.nextClickAt=now+1000/this.config.clickRate;
+    try{if(this.adapter.click(this.config.clickRate))this.clicks.push(now);}catch(e){this.error=e.message;this.onUpdate(this);}
+  }
   collectTick(){if(!this.owns() || this.config.observeOnly || this.error)return;try{this.adapter.collect(this.config);}catch(e){this.error=e.message;this.onUpdate(this);}}
   async tick(){
     if(!this.owns() || this.running || this.adapter.fault || this.error==='purchase-result-unresolved')return;
@@ -498,7 +510,12 @@ class Coordinator {
     if(this.config.observeOnly===value)return;
     this.generation++;this.config.observeOnly=value;this.commitment=null;this.last=null;this.resume();
   }
-  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.onUpdate(this);}
+  clearCommitment(){this.generation++;this.commitment=null;this.last=null;this.onUpdate(this);}
+  setClickRate(value){
+    if(!Number.isInteger(value) || value<1 || value>100)throw new TypeError('クリック速度は1〜100の整数で指定してください');
+    this.config.clickRate=value;this.clearCommitment();this.resume();
+  }
+  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.nextClickAt=0;this.onUpdate(this);}
   shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
 }
 
@@ -727,33 +744,90 @@ class Diagnostics {
 Object.assign(exports,{hash,bundle,replay,Diagnostics});
 },
 "src/ui/panel.mjs":function(require,exports){
+const { attachPanelLayout }=require("src/ui/panel-layout.mjs");
 function mountPanel(runtime,document){
   document.getElementById('cc-rebuild-panel')?.remove();
   const root=document.createElement('section');root.id='cc-rebuild-panel';
-  root.style.cssText='position:fixed;left:12px;top:60px;z-index:1000000;width:340px;max-height:75vh;overflow:auto;background:#161d28;color:#fff;border:1px solid #63758e;border-radius:10px;padding:14px;font:13px/1.6 sans-serif;box-shadow:0 4px 20px #0008';
-  const title=document.createElement('strong');title.textContent='Cookie Auto '+runtime.version;root.append(title);
-  const status=document.createElement('pre');status.style.cssText='white-space:pre-wrap;font:inherit';root.append(status);
-  const controls=document.createElement('div');root.append(controls);
+  root.style.cssText='position:fixed;left:12px;top:60px;z-index:1000000;box-sizing:border-box;width:368px;min-width:240px;min-height:180px;max-width:100vw;max-height:100vh;resize:both;overflow:auto;background:#161d28;color:#fff;border:1px solid #63758e;border-radius:10px;padding:14px;font:13px/1.6 sans-serif;box-shadow:0 4px 20px #0008';
+  const title=document.createElement('strong');title.textContent='Cookie Auto '+runtime.version;
+  title.style.cssText='display:block;position:sticky;top:0;background:#161d28;cursor:move;touch-action:none;user-select:none;padding:4px 0';
+  title.title='ドラッグまたは矢印キーで移動';
+  const header=document.createElement('div');header.style.cssText='display:flex;align-items:center;gap:8px';title.style.flex='1';header.append(title);root.append(header);
+  const collapse=document.createElement('button');header.append(collapse);
+  const body=document.createElement('div');root.append(body);
+  const hint=document.createElement('small');hint.textContent='上部で移動 · 右下でサイズ変更（位置とサイズは保存）';body.append(hint);
+  const status=document.createElement('pre');status.style.cssText='white-space:pre-wrap;font:inherit';status.setAttribute('role','status');body.append(status);
+  const controls=document.createElement('div');body.append(controls);
   function button(label,handler){const b=document.createElement('button');b.textContent=label;b.style.cssText='margin:3px;padding:4px 7px;cursor:pointer';b.onclick=handler;controls.append(b);return b;}
   const mode=button('自動化を開始',()=>{runtime.setObserveOnly(!runtime.config.observeOnly);runtime.tick();render();});
   button('診断JSON',async()=>{try{const records=await runtime.diagnostics.exportAll();const blob=new Blob([JSON.stringify(records,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='cookie-auto-diagnostics.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){runtime.error=e.message;render();}});
   button('再観測',()=>{runtime.resume();runtime.tick();});
-  button('予約解除',()=>{runtime.commitment=null;runtime.tick();});
+  button('予約解除',()=>{runtime.clearCommitment();runtime.tick();});
   button('停止',()=>runtime.shutdown());
+  button('位置を戻す',()=>{layout.reset();render();});
+  const settings=document.createElement('label');settings.textContent='クリック目標（回/秒） ';body.append(settings);
+  const rate=document.createElement('input');rate.type='number';rate.min='1';rate.max='100';rate.step='1';rate.value=String(runtime.config.clickRate);rate.style.cssText='width:65px;margin:8px 0';settings.append(rate);
+  rate.onchange=()=>{const value=Number(rate.value);if(!Number.isInteger(value)||value<1||value>100){rate.setCustomValidity('1〜100の整数を入力してください');rate.reportValidity();return;}rate.setCustomValidity('');runtime.setClickRate(value);runtime.tick();};
   const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='候補と判断の詳細';details.append(summary);
-  const text=document.createElement('pre');text.style.cssText='white-space:pre-wrap;font-size:11px';details.append(text);root.append(details);
+  const text=document.createElement('pre');text.style.cssText='white-space:pre-wrap;font-size:11px';details.append(text);body.append(details);
   let renderedDecision=null;
   details.ontoggle=()=>render();
   function render(){
     const d=runtime.last?.decision;
-    status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n単一起動：${runtime.owns()?'有効':'所有権なし'}\n${runtime.error?'診断：'+runtime.error:d?d.reasonCode+' / '+d.selectedAction.id:'ゲーム状態を確認中'}\n予約：${runtime.commitment?.targetId??'なし'}\n実クリック：約${runtime.clickRate().toFixed(1)}回/秒\n基本購入版：ミニゲーム自動操作は未対応`;
+    const reasons={WAIT_TARGET:'購入資金を貯めています',BUY_TARGET:'予約対象を購入',BUY_BEST_PLAN:'成長効率を比較して購入',BUY_ADVANCES_TARGET:'目標への到達を早める購入',WAIT_EVENT:'次の変化を待っています',WAIT_UNKNOWN_EFFECT:'効果が未対応のため待機',WAIT_TARGET_UNAVAILABLE:'予約対象を再確認中',WAIT_PENDING:'購入結果を確認中'};
+    const target=runtime.commitment?.targetId;
+    const candidate=d?.allCandidates.find(c=>c.id===(target??d.selectedAction.id));
+    const name=candidate?.displayName ?? (candidate?.kind==='building'?'施設 '+candidate.targetId:(target??'なし'));
+    const eta=d?.targetEta?.direct;
+    status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
     if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}
     mode.textContent=runtime.config.observeOnly?'自動化を開始':'観測モードへ';mode.disabled=runtime.stopped;
+    collapse.textContent=layout.collapsed()?'展開':'折りたたむ';collapse.setAttribute('aria-expanded',String(!layout.collapsed()));
   }
-  const previous=runtime.onUpdate;runtime.onUpdate=r=>{previous(r);if(runtime.stopped)root.remove();else render();};
-  document.body.append(root);render();return {root,render};
+  document.body.append(root);
+  const layout=attachPanelLayout(root,title,body,document);collapse.onclick=()=>{layout.toggle();render();};
+  const previous=runtime.onUpdate;runtime.onUpdate=r=>{previous(r);if(runtime.stopped){layout.destroy();root.remove();}else render();};
+  render();return {root,render};
 }
 
 Object.assign(exports,{mountPanel});
+},
+"src/ui/panel-layout.mjs":function(require,exports){
+const KEY='CC_REBUILD_PANEL_V1';
+function attachPanelLayout(root,handle,body,document){
+  const view=document.defaultView;
+  let state={left:12,top:60,width:368,height:null,collapsed:false},drag=null,timer=null;
+  try{const saved=JSON.parse(view.localStorage.getItem(KEY));if(saved){for(const key of ['left','top','width','height'])if(Number.isFinite(saved[key])&&saved[key]>=0)state[key]=saved[key];state.collapsed=saved.collapsed===true;}}catch{}
+  function persist(){try{view.localStorage.setItem(KEY,JSON.stringify(state));}catch{}}
+  function apply(){
+    state.width=Math.min(view.innerWidth,Math.max(240,state.width));
+    state.left=Math.max(0,Math.min(view.innerWidth-state.width,state.left));
+    state.top=Math.max(0,Math.min(Math.max(0,view.innerHeight-100),state.top));
+    root.style.left=state.left+'px';root.style.top=state.top+'px';root.style.width=state.width+'px';
+    root.style.maxHeight=Math.max(40,view.innerHeight-state.top)+'px';
+    root.style.minWidth=Math.min(240,view.innerWidth)+'px';
+    root.style.minHeight=state.collapsed?'0':Math.min(180,view.innerHeight-state.top)+'px';
+    root.style.height=state.collapsed || state.height===null?'auto':Math.min(state.height,view.innerHeight-state.top)+'px';
+    root.style.resize=state.collapsed?'none':'both';body.hidden=state.collapsed;
+  }
+  function capture(){const box=root.getBoundingClientRect();state.left=box.left;state.top=box.top;state.width=box.width;if(!state.collapsed)state.height=box.height;persist();}
+  handle.onpointerdown=e=>{if(e.button!==0)return;const box=root.getBoundingClientRect();drag={id:e.pointerId,x:e.clientX-box.left,y:e.clientY-box.top};handle.setPointerCapture(e.pointerId);e.preventDefault();};
+  handle.onpointermove=e=>{if(!drag || drag.id!==e.pointerId)return;state.left=e.clientX-drag.x;state.top=e.clientY-drag.y;apply();};
+  handle.onpointerup=handle.onpointercancel=()=>{drag=null;capture();};
+  handle.onlostpointercapture=()=>{drag=null;};
+  handle.tabIndex=0;handle.setAttribute('aria-label','パネルを移動。矢印キーでも移動できます');
+  handle.onkeydown=e=>{const delta={ArrowLeft:[-10,0],ArrowRight:[10,0],ArrowUp:[0,-10],ArrowDown:[0,10]}[e.key];if(!delta)return;e.preventDefault();state.left+=delta[0];state.top+=delta[1];apply();persist();};
+  const onResize=()=>{apply();persist();};view.addEventListener('resize',onResize);
+  const observer=typeof view.ResizeObserver==='function'?new view.ResizeObserver(()=>{view.clearTimeout(timer);timer=view.setTimeout(capture,200);}):null;
+  apply();observer?.observe(root);
+  return {
+    collapsed:()=>state.collapsed,
+    toggle(){if(!state.collapsed)capture();state.collapsed=!state.collapsed;apply();persist();},
+    reset(){state={left:12,top:60,width:368,height:null,collapsed:false};apply();persist();},
+    destroy(){observer?.disconnect();view.clearTimeout(timer);view.removeEventListener('resize',onResize);}
+  };
+}
+
+Object.assign(exports,{attachPanelLayout});
 }
 };const cache={};function require(id){if(!cache[id]){cache[id]={};factories[id](require,cache[id]);}return cache[id];}require("src/runtime/browser.mjs");})();

@@ -7,7 +7,7 @@ export const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 export class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.2';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.3';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -22,13 +22,20 @@ export class Coordinator {
     if(!this.owns())return;
     if(timers){
       this.timers.push(setInterval(()=>this.tick(),this.config.purchaseIntervalMs));
-      this.timers.push(setInterval(()=>this.clickTick(),Math.max(20,1000/Math.max(1,this.config.clickRate))));
+      this.timers.push(setInterval(()=>this.clickTick(),10));
       this.timers.push(setInterval(()=>this.collectTick(),150));
     }
     this.onUpdate(this);
   }
-  clickRate(){const now=this.clock();this.clicks=this.clicks.filter(t=>now-t<=5000);return now-this.started<5000?this.config.clickRate:this.clicks.length/5;}
-  clickTick(){if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;try{if(this.adapter.click())this.clicks.push(this.clock());}catch(e){this.error=e.message;this.onUpdate(this);}}
+  measuredClickRate(){const now=this.clock();this.clicks=this.clicks.filter(t=>now-t<5000);return this.config.observeOnly || !this.config.autoClick?0:this.clicks.length/Math.max(.001,Math.min(5,(now-this.started)/1000));}
+  clickRate(){return this.measuredClickRate();}
+  clickTick(){
+    if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;
+    const now=this.clock();if(now<(this.nextClickAt??0))return;
+    // No catch-up burst after a stalled/background tab.
+    this.nextClickAt=now+1000/this.config.clickRate;
+    try{if(this.adapter.click(this.config.clickRate))this.clicks.push(now);}catch(e){this.error=e.message;this.onUpdate(this);}
+  }
   collectTick(){if(!this.owns() || this.config.observeOnly || this.error)return;try{this.adapter.collect(this.config);}catch(e){this.error=e.message;this.onUpdate(this);}}
   async tick(){
     if(!this.owns() || this.running || this.adapter.fault || this.error==='purchase-result-unresolved')return;
@@ -77,6 +84,11 @@ export class Coordinator {
     if(this.config.observeOnly===value)return;
     this.generation++;this.config.observeOnly=value;this.commitment=null;this.last=null;this.resume();
   }
-  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.onUpdate(this);}
+  clearCommitment(){this.generation++;this.commitment=null;this.last=null;this.onUpdate(this);}
+  setClickRate(value){
+    if(!Number.isInteger(value) || value<1 || value>100)throw new TypeError('クリック速度は1〜100の整数で指定してください');
+    this.config.clickRate=value;this.clearCommitment();this.resume();
+  }
+  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.nextClickAt=0;this.onUpdate(this);}
   shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
 }

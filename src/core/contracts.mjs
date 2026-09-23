@@ -3,7 +3,7 @@ export const RULESET_VERSION = 'cc-web-2.058/basic-1';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
-  clickRate: 20, purchaseIntervalMs: 1500, riskWeight: 0.1,
+  clickRate: 100, purchaseIntervalMs: 1500, riskWeight: 0.1,
   observeOnly: true, autoClick: true, collectGolden: true, collectWrath: false,
   allowSell: false, allowLumps: false, allowAscend: false
 });

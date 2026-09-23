@@ -157,10 +157,15 @@ export class GameAdapter {
       throw new Error('operation-not-enabled');
     } finally { this.busy=false; }
   }
-  click() {
+  click(requestedRate = 50) {
     if (this.busy || !this.playable()) return false;
     const g=this.game,before=g.cookieClicks;
-    g.ClickCookie(); return g.cookieClicks>before;
+    // Web 2.058 rejects calls less than 20ms apart. Permit the configured automation
+    // rate through the normal click handler; never multiply cookie rewards directly.
+    const lastClick=g.lastClick;
+    if(requestedRate>50 && Number.isFinite(lastClick))g.lastClick=Math.min(lastClick,Date.now()-20);
+    try { g.ClickCookie(); return g.cookieClicks>before; }
+    finally { if(g.cookieClicks===before && requestedRate>50 && Number.isFinite(lastClick))g.lastClick=lastClick; }
   }
   collect(config) {
     if (this.busy || !this.playable()) return 0;
