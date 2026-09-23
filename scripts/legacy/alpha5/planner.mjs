@@ -1,7 +1,6 @@
 import { validateInput, clone, known, unknown, epsilon } from './contracts.mjs';
 import { income, allOffers, offerById, applyAction, advance, eta, effectDelta } from './model.mjs';
 import { unlockRoute } from './unlocks.mjs';
-import { goldenSummary } from './golden.mjs';
 
 const waitAction = (reason, seconds = null, targetId = null) => ({ id: 'wait', kind: 'wait', operation: 'waitUntil', targetId, price: 0, waitSeconds: seconds, reason });
 const buyAction = o => ({ id: o.id, kind: o.kind, operation: o.kind === 'building' ? 'buyBuilding' : 'buyUpgrade', targetId: o.targetId, quantity: 1, price: o.price });
@@ -10,7 +9,7 @@ function values(s, rootElapsed, horizons, config) {
     const remaining = h - (s.elapsed - rootElapsed);
     if (remaining < 0) return null;
     const end = advance(s, remaining, config.maxEvents);
-    return end.bank + end.deferred + goldenSummary(end.golden,config.riskWeight).value;
+    return end.bank + end.deferred;
   });
 }
 function dominates(a, b) { return a.every((v,i) => v >= b[i] - epsilon(v,b[i])) && a.some((v,i) => v > b[i] + epsilon(v,b[i])); }
@@ -20,7 +19,7 @@ export function plan(input) {
   const warnings = [...s.modelWarnings];
   const offers = allOffers(s);
   const candidates = offers.map(o => {
-    const d = effectDelta(s,o,c.riskWeight), seconds = o.eligible ? eta(s,o.price,c.maxEvents) : Infinity;
+    const d = effectDelta(s,o), seconds = o.eligible ? eta(s,o.price,c.maxEvents) : Infinity;
     return { ...o, affordable: o.eligible && seconds === 0, waitSeconds: known(seconds),
       deltaLiquidCps: d ? known(d.liquid) : unknown('effect-not-covered'),
       deltaClickCps: d ? known(d.click) : unknown('effect-not-covered'),
@@ -33,19 +32,15 @@ export function plan(input) {
   if (commitment && s.owned.includes(commitment.targetId)) commitment = null;
   const target = commitment ? offers.find(o => o.id === commitment.targetId) : null;
   const unlockBudget={remaining:c.maxUnlockNodes};
-  const routes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0 || o.requiresAchievements))
+  const routes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0))
     .sort((a,b)=>Number(b.id===commitment?.targetId)-Number(a.id===commitment?.targetId) || a.id.localeCompare(b.id,'en'))
     .map(o=>unlockRoute(s,o.id,c,unlockBudget));
   const targetRoute=target && !target.eligible?routes.find(r=>r.targetId===target.id):null;
   const finiteT = candidates.filter(o => o.eligible && o.waitSeconds.status === 'known' && o.paybackSeconds.status === 'known').map(o => o.waitSeconds.value + o.paybackSeconds.value);
   const horizons = [...c.horizons];
   if (finiteT.length) horizons[2] = Math.max(horizons[2], 4 * Math.min(...finiteT));
-  for(const route of routes.filter(r=>r.status==='known' && offers.find(o=>o.id===r.targetId)?.research)){
-    const gain=income(route.state).economic-income(s).economic;
-    if(gain>0)horizons[2]=Math.max(horizons[2],4*(route.eta+route.cost/gain));
-  }
   if (target) {
-    const d = effectDelta(s,target,c.riskWeight), t = eta(s,target.price,c.maxEvents);
+    const d = effectDelta(s,target), t = eta(s,target.price,c.maxEvents);
     if (d?.economic > 0 && Number.isFinite(t)) horizons[2] = Math.max(horizons[2], 4 * (t + target.price / d.economic));
     if(targetRoute?.status==='known'){
       const gain=income(targetRoute.state).economic-income(s).economic;
@@ -55,14 +50,12 @@ export function plan(input) {
   horizons[1] = Math.max(horizons[1], horizons[2]/3);
   if (horizons.some(h => !Number.isFinite(h))) throw new Error('horizon-overflow');
   const baseline = values(s,s.elapsed,horizons,c);
-  const forecast = (state,h) => ({seconds:h,...goldenSummary(advance(state,h-(state.elapsed-s.elapsed),c.maxEvents).golden,c.riskWeight)});
   const score = v => v.reduce((sum,x,i) => sum + c.weights[i] * (x-baseline[i])/Math.max(1,Math.abs(baseline[i]),s.bank), 0);
   const record = { schemaVersion: 1, finalLayer: 'planner', horizons, strategyWeights: c.weights,
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
     targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
     unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null,
-    goldenModel:s.golden?{samples:s.golden.lanes.length,seed:s.golden.seed,maxSeconds:s.golden.maxSeconds,maxEvents:s.golden.maxEvents,riskWeight:c.riskWeight,baseline:horizons.map(h=>forecast(s,h)),omitted:['chain-rewards','storm-rewards','drops','discount-buffs']}:null,
     coverage:{unmodeledAffordable:candidates.filter(o=>o.affordable&&!o.effect&&!o.disabled).map(o=>o.id),
       unmodeled:candidates.filter(o=>!o.effect&&!o.disabled).map(o=>o.id),disabled:candidates.filter(o=>o.disabled).map(o=>o.id)} };
   function finish(action, reason, next = commitment) { record.selectedAction = action; record.reasonCode = reason; record.nextCommitment = next; return record; }
@@ -128,7 +121,7 @@ export function plan(input) {
     const entry={targetId:route.targetId,status:route.status,reason:route.reason??null,totalCost:route.cost,eta:route.eta,steps:route.path};record.unlockPaths.push(entry);
     if(route.status!=='known' || route.eta>=horizons[2])continue;
     const value=pathValues(route.path);entry.value=value;
-    if(route.path.length>c.depth || offers.find(o=>o.id===route.targetId)?.research || offers.find(o=>o.id===route.targetId)?.requiresAchievements){entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});}
+    if(route.path.length>c.depth){entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});}
   }
   const comparable=terminals.filter(n=>{
     if(n.path.length<=1 || !Number.isFinite(partialFloor))return true;

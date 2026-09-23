@@ -1,12 +1,11 @@
-export const ENGINE_VERSION = '9.0.0-alpha.6';
-export const RULESET_VERSION = 'cc-web-2.058/strategy-1';
+export const ENGINE_VERSION = '9.0.0-alpha.5';
+export const RULESET_VERSION = 'cc-web-2.058/basic-3';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
   maxUnlockSteps:24,maxUnlockNodes:256,
   switchMargin:.25,switchAbsolute:.05,switchConfirmations:3,switchCooldown:4,
   clickRate: 100, purchaseIntervalMs: 1500, riskWeight: 0.1,
-  goldenSamples:8,goldenSeed:713,
   observeOnly: true, autoClick: true, collectGolden: true, collectWrath: false,
   allowSell: false, allowLumps: false, allowAscend: false
 });
@@ -52,21 +51,6 @@ export function validateInput(input) {
     if(o.requiresBuildings!==undefined && (!Array.isArray(o.requiresBuildings)||o.requiresBuildings.some(r=>!Number.isInteger(r.id)||r.id<0||!Number.isInteger(r.amount)||r.amount<0)))throw new TypeError('invalid building prerequisites');
   }
   for (const b of s.buffs) if (b.remaining < 0 || b.passive < 0 || b.click < 0) throw new TypeError('invalid buff');
-  if(!Number.isFinite(c.riskWeight)||c.riskWeight<0||c.riskWeight>1)throw new TypeError('invalid risk weight');
-  if(!Number.isInteger(c.goldenSamples)||c.goldenSamples<1||c.goldenSamples>32||!Number.isInteger(c.goldenSeed)||c.goldenSeed<0||c.goldenSeed>4294967295)throw new TypeError('invalid golden config');
-  if(s.production){
-    const p=s.production;
-    if(!Number.isInteger(p.achievements)||p.achievements<0||!(p.baseKitten>0)||!(p.milkMultiplier>0)||p.kittenPowers.some(v=>v<0))throw new TypeError('invalid production model');
-    const milestoneIds=new Set();
-    for(const m of p.milestones){if(milestoneIds.has(m.id)||!Number.isInteger(m.amount)||m.amount<1||!s.buildings.some(b=>b.id===m.buildingId))throw new TypeError('invalid milestone');milestoneIds.add(m.id);}
-    for(const r of p.synergies)if(r.ka<0||r.kb<0||!s.buildings.some(b=>b.id===r.a)||!s.buildings.some(b=>b.id===r.b))throw new TypeError('invalid synergy');
-  }
-  if(s.golden){
-    const g=s.golden;
-    if(!(g.maxSeconds>0 && g.maxSeconds<=7200)||!Number.isInteger(g.maxEvents)||g.maxEvents<1||g.maxEvents>128||g.lanes.length<1||g.lanes.length>32||!(g.fps>0)||!(g.duration>0)||!(g.gain>=0))throw new TypeError('invalid golden budget');
-    for(const [a,b] of [[g.min,g.max],[g.futureMin,g.futureMax]])if(!(a>=0 && b>a && b*g.fps<=180000))throw new TypeError('invalid golden interval');
-    for(const lane of g.lanes)if(lane.extra<0||lane.next<0||lane.frenzy<0||lane.click<0||!Number.isInteger(lane.events)||lane.events<0)throw new TypeError('invalid golden sample');
-  }
   return input;
 }
 export function makeInput(options = {}) {

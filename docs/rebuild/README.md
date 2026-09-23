@@ -1,5 +1,7 @@
 # 再構築・詳細設計パッケージ
 
+相乗効果・Kitten・自然GC・研究経路の変更は[STRATEGY_ALPHA6](STRATEGY_ALPHA6.md)を参照。
+
 作成日: 2026-09-23 / 設計版: 1.0 / 状態: 実装前・検証前
 
 実装後の変更は[実装記録](IMPLEMENTATION.md)、購入戦略三点の追加設計は[STRATEGY_ALPHA4](STRATEGY_ALPHA4.md)を参照。予約切替と比較条件はalpha.4追加設計を優先する。

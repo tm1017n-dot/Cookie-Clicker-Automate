@@ -1,5 +1,9 @@
 # 再構築版 9.0.0-alpha.1 実装記録
 
+## 9.0.0-alpha.6 攻略モデルの拡張
+
+施設数に応じた相乗効果、ミルクとKitten、施設実績による解禁を先読みする。自然GCは同一seedの8シナリオで比較し、期待利益を購入資金から分離。研究は前提購入・残り研究時間・解禁後購入を一つの経路として評価する。詳細と制限は[STRATEGY_ALPHA6](STRATEGY_ALPHA6.md)。配布版・実行時・診断の版をalpha.6 / strategy-1へ更新し、alpha.5の旧診断再生を保存した。
+
 ## 9.0.0-alpha.5 未評価候補・負荷の改善
 
 詳細は[追加設計と検証](PERFORMANCE_ALPHA5.md)。engineは9.0.0-alpha.5、rulesetはbasic-3。

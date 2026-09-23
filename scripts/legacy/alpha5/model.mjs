@@ -1,17 +1,13 @@
 import { clone, epsilon } from './contracts.mjs';
-import { productionValue,achievementCount } from './production.mjs';
-import { copyGolden,advanceGolden,goldenSummary } from './golden.mjs';
 
 // Copy only writable simulation data. Effects, prerequisites and evidence are immutable.
 export function copyState(s) {
   return {...s,buildings:s.buildings.map(b=>({...b})),offers:s.offers?.map(o=>({...o})),
-    owned:s.owned?.slice(),buffs:s.buffs.map(b=>({...b})),events:s.events?.slice(),
-    ...(s.production?{production:{...s.production,synergies:s.production.synergies.slice(),kittenPowers:s.production.kittenPowers.slice()}}:{}),
-    ...(s.golden?{golden:copyGolden(s.golden)}:{})};
+    owned:s.owned?.slice(),buffs:s.buffs.map(b=>({...b})),events:s.events?.slice()};
 }
 
 export function income(s) {
-  const raw = productionValue(s);
+  const raw = Math.max(0, s.passive + s.buildings.reduce((sum, b) => sum + b.amount * b.unitCps, 0));
   const passiveMult = s.buffs.reduce((m, b) => m * b.passive, 1);
   const clickMult = s.buffs.reduce((m, b) => m * b.click, 1);
   const passive = raw * passiveMult;
@@ -29,8 +25,6 @@ export function buildingPrice(b) {
 export function eligible(s, o) {
   if (s.owned.includes(o.id) || o.disabled || o.price === null) return false;
   if (s.pricesChanged && o.unverifiedPrice) return false;
-  if (o.research && !o.researchReady) return false;
-  if (o.requiresAchievements && achievementCount(s)<o.requiresAchievements) return false;
   if (o.requiresOwned?.some(id => !s.owned.includes(id))) return false;
   if (o.requiresBuildings?.some(r => (s.buildings.find(b => b.id === r.id)?.amount ?? 0) < r.amount)) return false;
   if (o.availableAt != null && s.elapsed < o.availableAt) return false;
@@ -48,13 +42,6 @@ export function offerById(s,id) {
   return o?{...o,eligible:eligible(s,o)}:undefined;
 }
 export function applyEffect(s, e) {
-  if(e.golden && s.golden){s.golden.futureMin*=e.golden.frequency??1;s.golden.futureMax*=e.golden.frequency??1;s.golden.duration*=e.golden.duration??1;}
-  if(e.synergies && s.production)s.production.synergies.push(...e.synergies);
-  if(e.kittenPower!=null && s.production)s.production.kittenPowers.push(e.kittenPower);
-  if(e.startResearch){
-    const target=s.offers.find(o=>o.id===e.startResearch.targetId);
-    if(target){target.researchReady=true;target.availableAt=s.elapsed+e.startResearch.seconds;}
-  }
   if (e.building != null) s.buildings.find(b => b.id === e.building).amount++;
   s.passive += e.flatPassive ?? 0;
   s.clickUnit += e.flatClick ?? 0;
@@ -63,7 +50,6 @@ export function applyEffect(s, e) {
   if (e.passiveMultiplier != null) {
     s.passive *= e.passiveMultiplier;
     for (const b of s.buildings) b.unitCps *= e.passiveMultiplier;
-    if(s.production)s.production.cursorCoefficient=(s.production.cursorCoefficient??0)*e.passiveMultiplier;
   }
   if (e.clickMultiplier != null) {
     s.clickUnit *= e.clickMultiplier;
@@ -110,7 +96,6 @@ export function advance(state, seconds, maxEvents = 4096) {
     const upcoming = s.events.filter(e => e.at > s.elapsed).map(e => e.at - s.elapsed);
     const dt = Math.min(left, ...s.buffs.filter(b => b.remaining > 0).map(b => b.remaining), ...upcoming);
     const rates = income(s);
-    advanceGolden(s,dt,rates);
     s.bank += rates.liquid * dt;
     s.earned += rates.liquid * dt;
     s.deferred += (s.deferredRate || 0) * dt;
@@ -139,15 +124,10 @@ export function eta(state, price, maxEvents = 4096) {
   }
   return Infinity;
 }
-export function effectDelta(s, offer, riskWeight = .1) {
+export function effectDelta(s, offer) {
   if (!offer.effect) return null;
   const before = income(s), after = copyState(s);
   applyEffect(after, offer.effect);
   const out = income(after);
-  let expected=0;
-  if(offer.effect.golden && s.golden){
-    const h=Math.min(s.golden.maxSeconds,Math.max(900,4*s.golden.futureMax));
-    expected=(goldenSummary(advance(after,h).golden,riskWeight).value-goldenSummary(advance(s,h).golden,riskWeight).value)/h;
-  }
-  return { liquid: out.liquid - before.liquid, click: out.click - before.click, economic: out.economic - before.economic+expected };
+  return { liquid: out.liquid - before.liquid, click: out.click - before.click, economic: out.economic - before.economic };
 }
