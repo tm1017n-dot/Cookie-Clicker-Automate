@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.3
+// @version 9.0.0-alpha.4
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
 // @grant none
@@ -42,6 +42,13 @@ const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.Up
 // Audited CalculateGains 2.058 writes root caches, these two maps and building caches.
 // Win/Unlock are disabled during measurement; only the explicitly changed upgrade is writable.
 const gainsObjects=(g,touched)=>[g,g.cookiesPsByType,g.cookiesMultByType,...collection(g.ObjectsById),...touched];
+function normalTier(g,u){
+  const b=u.buildingTie,t=g.Tiers?.[u.tier];
+  if(!b || b.id===0 || !Number.isInteger(Number(u.tier)) || !t || t.special || !Number.isInteger(t.unlock) || t.unlock<1 || b.tieredUpgrades?.[u.tier]!==u || u.buildingTie2 || u.buyFunction || u.priceFunc)return null;
+  let multiplier=2;
+  if(g.ascensionMode!==1 && b.unshackleUpgrade && t.unshackleUpgrade && g.Has?.(b.unshackleUpgrade) && g.Has?.(t.unshackleUpgrade))multiplier+=b.id===1?.5:(20-b.id)*.1;
+  return {buildingId:b.id,amount:t.unlock,multiplier};
+}
 
 class GameAdapter {
   constructor(getGame, { supportedVersions = ['2.058'] } = {}) {
@@ -81,6 +88,10 @@ class GameAdapter {
   marker(action) {
     const g = this.game;
     return action.operation === 'buyBuilding' ? g.ObjectsById[action.targetId]?.amount : g.UpgradesById[action.targetId]?.bought;
+  }
+  available(action){
+    const g=this.game;
+    return action.kind==='upgrade'?(g.UpgradesInStore??[]).some(u=>u.id===action.targetId):!!g.ObjectsById[action.targetId]&&!g.ObjectsById[action.targetId].locked;
   }
   runIdentity() { const g=this.game; return JSON.stringify([g.startDate??null,g.fullDate??null,g.resets??0]); }
   signature() {
@@ -126,13 +137,23 @@ class GameAdapter {
         rootOnly:crossEffect, measurement:{passive:passiveDelta,mouse:clickDelta} };
     });
     const offered = new Set((g.UpgradesInStore || []).map(u => u.id));
-    const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2)).map(u => {
+    const nextTiers=new Map();
+    for(const u of collection(g.UpgradesById)){
+      const tier=normalTier(g,u);if(u.bought || u.unlocked || !tier)continue;
+      const current=nextTiers.get(tier.buildingId);
+      if(!current || tier.amount<current.tier.amount || (tier.amount===current.tier.amount && u.id<current.upgrade.id))nextTiers.set(tier.buildingId,{upgrade:u,tier});
+    }
+    const futureIds=new Set([...nextTiers.values()].map(x=>x.upgrade.id));
+    const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2 || futureIds.has(u.id))).map(u => {
       const price = this.price('upgrade',u.id);
+      const tier=normalTier(g,u),future=futureIds.has(u.id) && !offered.has(u.id);
       const disallowed = ['prestige','debug','toggle'].includes(u.pool) || Boolean(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask);
-      const measured = this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
-      const passiveDelta = measured.passive-steady.passive, mouseDelta = measured.mouse-steady.mouse;
+      // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
+      const measured = future?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
+      const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
+      else if(tier){effect={buildingMultipliers:[{id:tier.buildingId,multiplier:tier.multiplier}]};rootOnly=false;confidence='high';}
       else if (u.buildingTie && u.tier != null && !u.buildingTie1 && passiveDelta > 0) {
         const b = buildings.find(b => b.id === u.buildingTie.id);
         if (b && b.amount*b.unitCps > 0) {
@@ -140,21 +161,22 @@ class GameAdapter {
           if (Math.abs(mouseDelta-fraction*passiveDelta)>Math.max(1e-8,Math.abs(mouseDelta)*1e-6)) rootOnly=true;
         }
       }
-      if (effect && !rootOnly) {
+      if (measured && effect && !rootOnly) {
         const prediction=effectDelta({passive:steady.passive-buildings.reduce((n,b)=>n+b.amount*b.unitCps,0),buildings,
           buffs:[],clickUnit:steady.mouse-fraction*steady.passive,clickFraction:fraction,nonCursorClick:0,clickRate:1}, {effect});
         const agrees=(a,b)=>Math.abs(a-b)<=Math.max(1e-8,Math.abs(b)*1e-6);
         if(!agrees(prediction.click,mouseDelta) || !agrees(prediction.liquid-prediction.click,passiveDelta))rootOnly=true;
       }
       if (!effect || rootOnly) {
+        effect=null;
         if (passiveDelta !== 0 || mouseDelta !== 0) { effect={flatPassive:passiveDelta,flatClick:mouseDelta-fraction*passiveDelta}; confidence='medium'; }
       }
       const available = offered.has(u.id);
       return {id:'upgrade:'+u.id,kind:'upgrade',targetId:u.id,price,effect,rootOnly,confidence,
         internalName:u.name,displayName:u.dname ?? u.name,pool:u.pool ?? '',
-        disabled:disallowed || (!available && u.id>2),
-        requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : [],
-        evidence:[{source:'Game.CalculateGains',coverage:u.buyFunction?'bought-only':'production',passiveDelta,mouseDelta}],
+        disabled:disallowed || (!available && u.id>2 && !future),
+        requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : future?[{id:tier.buildingId,amount:tier.amount}]:[],
+        evidence:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains',coverage:u.buyFunction?'bought-only':'production',passiveDelta,mouseDelta}],
         warnings:disallowed?['special-operation-not-enabled']:(effect?[]:['unknown-effect'])};
     });
     const sum = buildings.reduce((n,b) => n+b.unitCps*b.amount,0);
@@ -210,11 +232,13 @@ class GameAdapter {
 Object.assign(exports,{GameAdapter});
 },
 "src/core/contracts.mjs":function(require,exports){
-const ENGINE_VERSION = '9.0.0-alpha.1';
-const RULESET_VERSION = 'cc-web-2.058/basic-1';
+const ENGINE_VERSION = '9.0.0-alpha.4';
+const RULESET_VERSION = 'cc-web-2.058/basic-2';
 const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
+  maxUnlockSteps:24,maxUnlockNodes:256,
+  switchMargin:.25,switchAbsolute:.05,switchConfirmations:3,switchCooldown:4,
   clickRate: 100, purchaseIntervalMs: 1500, riskWeight: 0.1,
   observeOnly: true, autoClick: true, collectGolden: true, collectWrath: false,
   allowSell: false, allowLumps: false, allowAscend: false
@@ -246,6 +270,8 @@ function validateInput(input) {
   for (const key of ['passive', 'clickUnit', 'clickFraction', 'nonCursorClick', 'deferred', 'earned']) if (!Number.isFinite(s[key])) throw new TypeError('invalid state.' + key);
   for (const key of ['depth', 'beamWidth', 'maxNodes', 'maxEvents']) if (!Number.isInteger(c[key]) || c[key] < 1) throw new TypeError('invalid config.' + key);
   if (c.depth > 5 || c.maxNodes > 10000 || c.maxEvents > 10000 || c.beamWidth > 128) throw new TypeError('unsafe planning budget');
+  for(const key of ['maxUnlockSteps','maxUnlockNodes','switchConfirmations','switchCooldown'])if(!Number.isInteger(c[key])||c[key]<1||c[key]>1024)throw new TypeError('invalid config.'+key);
+  for(const key of ['switchMargin','switchAbsolute'])if(!Number.isFinite(c[key])||c[key]<0||c[key]>10)throw new TypeError('invalid config.'+key);
   if (c.horizons.length !== 3 || c.weights.length !== 3 || c.horizons.some((h, i) => h <= 0 || (i && h <= c.horizons[i - 1])) || c.weights.some(w => w < 0) || c.weights.reduce((a,b) => a+b,0) <= 0) throw new TypeError('invalid horizons/weights');
   const ids = new Set();
   for (const b of s.buildings) {
@@ -255,6 +281,8 @@ function validateInput(input) {
   for (const o of s.offers) {
     if (ids.has(o.id) || typeof o.id !== 'string' || (o.price !== null && (typeof o.price !== 'number' || o.price < 0))) throw new TypeError('invalid offer');
     ids.add(o.id);
+    if(o.requiresOwned!==undefined && (!Array.isArray(o.requiresOwned)||o.requiresOwned.some(id=>typeof id!=='string')))throw new TypeError('invalid upgrade prerequisites');
+    if(o.requiresBuildings!==undefined && (!Array.isArray(o.requiresBuildings)||o.requiresBuildings.some(r=>!Number.isInteger(r.id)||r.id<0||!Number.isInteger(r.amount)||r.amount<0)))throw new TypeError('invalid building prerequisites');
   }
   for (const b of s.buffs) if (b.remaining < 0 || b.passive < 0 || b.click < 0) throw new TypeError('invalid buff');
   return input;
@@ -433,7 +461,7 @@ const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.3';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.4';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -524,6 +552,7 @@ Object.assign(exports,{RUNTIME_KEY,Coordinator});
 "src/core/planner.mjs":function(require,exports){
 const { validateInput, clone, known, unknown, epsilon }=require("src/core/contracts.mjs");
 const { income, allOffers, applyAction, advance, eta, effectDelta }=require("src/core/model.mjs");
+const { unlockRoute }=require("src/core/unlocks.mjs");
 
 const waitAction = (reason, seconds = null, targetId = null) => ({ id: 'wait', kind: 'wait', operation: 'waitUntil', targetId, price: 0, waitSeconds: seconds, reason });
 const buyAction = o => ({ id: o.id, kind: o.kind, operation: o.kind === 'building' ? 'buyBuilding' : 'buyUpgrade', targetId: o.targetId, quantity: 1, price: o.price });
@@ -554,12 +583,21 @@ function plan(input) {
   let commitment = clone(s.commitment);
   if (commitment && s.owned.includes(commitment.targetId)) commitment = null;
   const target = commitment ? offers.find(o => o.id === commitment.targetId) : null;
+  const unlockBudget={remaining:c.maxUnlockNodes};
+  const routes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0))
+    .sort((a,b)=>Number(b.id===commitment?.targetId)-Number(a.id===commitment?.targetId) || a.id.localeCompare(b.id,'en'))
+    .map(o=>unlockRoute(s,o.id,c,unlockBudget));
+  const targetRoute=target && !target.eligible?routes.find(r=>r.targetId===target.id):null;
   const finiteT = candidates.filter(o => o.eligible && o.waitSeconds.status === 'known' && o.paybackSeconds.status === 'known').map(o => o.waitSeconds.value + o.paybackSeconds.value);
   const horizons = [...c.horizons];
   if (finiteT.length) horizons[2] = Math.max(horizons[2], 4 * Math.min(...finiteT));
   if (target) {
     const d = effectDelta(s,target), t = eta(s,target.price,c.maxEvents);
     if (d?.economic > 0 && Number.isFinite(t)) horizons[2] = Math.max(horizons[2], 4 * (t + target.price / d.economic));
+    if(targetRoute?.status==='known'){
+      const gain=income(targetRoute.state).economic-income(s).economic;
+      if(gain>0)horizons[2]=Math.max(horizons[2],4*(targetRoute.eta+targetRoute.cost/gain));
+    }
   }
   horizons[1] = Math.max(horizons[1], horizons[2]/3);
   if (horizons.some(h => !Number.isFinite(h))) throw new Error('horizon-overflow');
@@ -568,25 +606,30 @@ function plan(input) {
   const record = { schemaVersion: 1, finalLayer: 'planner', horizons, strategyWeights: c.weights,
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
-    targetEta: null, reasonCode: 'WAIT_EVENT', warnings };
+    targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
+    unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null };
   function finish(action, reason, next = commitment) { record.selectedAction = action; record.reasonCode = reason; record.nextCommitment = next; return record; }
   if (s.pendingExecution) return finish(waitAction('WAIT_PENDING'), 'WAIT_PENDING');
-  if (commitment) {
-    if (!target || !target.eligible || !target.effect) return finish(waitAction('WAIT_TARGET_UNAVAILABLE',null,commitment.targetId),'WAIT_TARGET_UNAVAILABLE',{...commitment,status:'blocked'});
-    const direct = eta(s,target.price,c.maxEvents);
-    const vias = offers.filter(o => o.id !== target.id && o.eligible && o.effect && eta(s,o.price,c.maxEvents) === 0).map(o => {
-      const next = applyAction(s,o), afterTarget = allOffers(next).find(x => x.id === target.id);
-      return { actionId: o.id, seconds: known(afterTarget ? eta(next,afterTarget.price,c.maxEvents) : Infinity) };
-    });
-    record.targetEta = { targetId: target.id, direct: known(direct), via: vias };
-    if (direct === 0) return finish(buyAction(target),'BUY_TARGET',{...commitment,status:'ready'});
-    const better = vias.filter(v => v.seconds.status === 'known' && v.seconds.value < direct - Math.max(1/input.environment.fps,epsilon(direct,v.seconds.value)));
-    better.sort((a,b) => a.seconds.value-b.seconds.value || a.actionId.localeCompare(b.actionId));
-    if (better.length) return finish(buyAction(offers.find(o => o.id === better[0].actionId)), 'BUY_ADVANCES_TARGET',{...commitment,status:'saving'});
-    return finish(waitAction('WAIT_TARGET',Number.isFinite(direct)?direct:null,target.id),'WAIT_TARGET',{...commitment,status:Number.isFinite(direct)?'saving':'blocked'});
-  }
+  if(commitment && target?.eligible && target.effect && eta(s,target.price,c.maxEvents)===0)return finish(buyAction(target),'BUY_TARGET',{...commitment,status:'ready'});
+  function pathValues(path){return horizons.map(h=>{
+    let at=s;
+    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,allOffers(at).find(x=>x.id===step.action.id));if(!at)throw new Error('invalid-simulation-path');}
+    return values(at,s.elapsed,[h],c)[0];
+  });}
   const root = { id: 0, state: s, path: [], value: baseline, score: 0 };
-  let beam = [root], terminals = [root], nodeId = 1;
+  const singles=[];
+  for(const o of offers){
+    if(!o.eligible || !o.effect)continue;
+    const wait=eta(s,o.price,c.maxEvents);if(!Number.isFinite(wait) || wait>=horizons[2])continue;
+    const ready=advance(s,wait,c.maxEvents),current=allOffers(ready).find(x=>x.id===o.id),after=applyAction(ready,current);if(!after)continue;
+    const path=[{action:buyAction(current),at:after.elapsed-s.elapsed,wait}],value=pathValues(path);
+    singles.push({id:-singles.length-1,state:after,path,value,score:score(value),terminalOnly:!!o.rootOnly});
+  }
+  const singleById=new Map(singles.map(n=>[n.path[0].action.id,n]));
+  record.singleStepNodes=singles.map(n=>({id:n.id,actionId:n.path[0].action.id,at:n.path[0].at,value:n.value}));
+  const partialFloor=Math.max(-Infinity,...singles.filter(n=>n.terminalOnly).map(n=>n.score));
+  record.comparison.partialFloor=known(partialFloor);
+  let beam = [root], terminals = [root,...singles], nodeId = 1;
   for (let depth = 0; depth < c.depth && beam.length; depth++) {
     const nextLevel = [];
     for (const node of beam) {
@@ -601,15 +644,7 @@ function plan(input) {
         const after = applyAction(ready,currentOffer);
         if (!after) continue;
         const path = [...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
-        const v = horizons.map(h => {
-          let at = s;
-          for (const step of path) {
-            if (step.at > h) break;
-            at = advance(at,step.at - (at.elapsed-s.elapsed),c.maxEvents);
-            at = applyAction(at,allOffers(at).find(x => x.id === step.action.id));
-          }
-          return values(at,s.elapsed,[h],c)[0];
-        });
+        const v = pathValues(path);
         const next = { id: nodeId++, state: after, path, value: v, score: score(v), terminalOnly:!!o.rootOnly };
         nextLevel.push(next); terminals.push(next);
         record.expandedNodes.push({ id:next.id,parentId:node.id,actionId:o.id,at:after.elapsed-s.elapsed,value:v });
@@ -627,27 +662,132 @@ function plan(input) {
     beam = selected;
     if (nodeId > c.maxNodes) { if(!warnings.includes('node-budget'))warnings.push('node-budget'); break; }
   }
-  const frontier = terminals.filter(n => !terminals.some(other => other !== n && dominates(other.value,n.value)));
+  for(const route of routes){
+    const entry={targetId:route.targetId,status:route.status,reason:route.reason??null,totalCost:route.cost,eta:route.eta,steps:route.path};record.unlockPaths.push(entry);
+    if(route.status!=='known' || route.eta>=horizons[2])continue;
+    const value=pathValues(route.path);entry.value=value;
+    if(route.path.length>c.depth){entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});}
+  }
+  const comparable=terminals.filter(n=>{
+    if(n.path.length<=1 || !Number.isFinite(partialFloor))return true;
+    const one=singleById.get(n.path[0].action.id);
+    const allowed=one && one.score>=partialFloor-epsilon(one.score,partialFloor);
+    if(!allowed)record.comparison.heldBack.push({nodeId:n.id,actionId:n.path[0].action.id,reason:'unequal-model-coverage'});
+    return allowed;
+  });
+  const frontier = comparable.filter(n => !comparable.some(other => other !== n && dominates(other.value,n.value)));
   record.frontier = frontier.map(n => n.id);
   for (const candidate of candidates) {
     const matching = terminals.filter(n => n.path[0]?.action.id === candidate.id);
     matching.sort((a,b) => b.score-a.score || a.id-b.id);
     candidate.horizons = (matching[0]?.value ?? []).map((value,i) => ({ seconds:horizons[i],objectiveValue:value }));
+    const one=singleById.get(candidate.id);
+    candidate.oneStepHorizons=(one?.value??[]).map((value,i)=>({seconds:horizons[i],objectiveValue:value}));
+    candidate.additionalValue=one && matching.length?matching[0].value.map((v,i)=>v-one.value[i]):[];
   }
   frontier.sort((a,b) => {
     if (Math.abs(a.score-b.score) > epsilon(a.score,b.score)) return b.score-a.score;
     return (a.path[0]?.action.price ?? 0)-(b.path[0]?.action.price ?? 0) || (a.path[0]?.action.id ?? 'wait').localeCompare(b.path[0]?.action.id ?? 'wait');
   });
   const best = frontier[0] ?? root;
+  if(commitment){
+    if(!target || !target.effect || (!target.eligible && targetRoute?.status!=='known'))return finish(waitAction('WAIT_TARGET_UNAVAILABLE',null,commitment.targetId),'WAIT_TARGET_UNAVAILABLE',{...commitment,status:'blocked'});
+    const direct=target.eligible?eta(s,target.price,c.maxEvents):targetRoute.eta;
+    const incumbent=target.eligible?singleById.get(target.id):{score:score(pathValues(targetRoute.path))};
+    const challengerId=best.goalId??best.path[0]?.action.id;
+    const challenger=best.goalId?best:singleById.get(challengerId);
+    const cooldown=Math.max(0,(commitment.cooldown??0)-1);
+    const improvement=challenger && incumbent?challenger.score-incumbent.score:null;
+    const required=incumbent?Math.max(c.switchAbsolute,Math.abs(incumbent.score)*c.switchMargin):null;
+    const qualifies=!!challengerId && challengerId!==target.id && improvement!==null && improvement>required && !(commitment.cooldown>0);
+    const count=qualifies?(commitment.challengerId===challengerId?(commitment.challengerCount??0)+1:1):0;
+    const switched=count>=c.switchConfirmations;
+    record.reservationReview={oldTarget:target.id,challengerId:challengerId??null,improvement,required,confirmations:count,cooldown,switched,basis:best.goalId || !target.eligible?'complete-unlock-route':'one-step'};
+    if(switched){commitment={targetId:challengerId,status:'saving',cooldown:c.switchCooldown,challengerCount:0};}
+    else{
+      commitment={...commitment,cooldown,challengerId:qualifies?challengerId:null,challengerCount:count};
+      const viaBudget={remaining:c.maxUnlockNodes};
+      const vias=offers.filter(o=>o.id!==target.id && o.eligible && o.effect && !o.rootOnly && eta(s,o.price,c.maxEvents)===0).map(o=>{
+        const next=applyAction(s,o),afterTarget=allOffers(next).find(x=>x.id===target.id);
+        const route=afterTarget && !afterTarget.eligible?unlockRoute(next,target.id,c,viaBudget):null;
+        const seconds=afterTarget?.eligible?eta(next,afterTarget.price,c.maxEvents):route?.status==='known'?route.eta:Infinity;
+        return {actionId:o.id,seconds:known(seconds)};
+      });
+      record.targetEta={targetId:target.id,direct:known(direct),via:vias};
+      const better=vias.filter(v=>v.seconds.status==='known' && (!Number.isFinite(direct) || v.seconds.value<direct-Math.max(1/input.environment.fps,epsilon(direct,v.seconds.value))));
+      better.sort((a,b)=>a.seconds.value-b.seconds.value || a.actionId.localeCompare(b.actionId));
+      if(better.length)return finish(buyAction(offers.find(o=>o.id===better[0].actionId)),'BUY_ADVANCES_TARGET',{...commitment,status:'saving'});
+      if(!target.eligible){
+        record.plannedSteps=targetRoute.path;const first=targetRoute.path[0];
+        return first.wait>0?finish(waitAction('WAIT_UNLOCK_PREREQUISITE',first.wait,first.action.id),'WAIT_UNLOCK_PREREQUISITE',commitment):finish(first.action,'BUY_UNLOCK_PREREQUISITE',commitment);
+      }
+      return finish(waitAction('WAIT_TARGET',Number.isFinite(direct)?direct:null,target.id),'WAIT_TARGET',{...commitment,status:Number.isFinite(direct)?'saving':'blocked'});
+    }
+  }
   record.plannedSteps = best.path;
   record.objectiveComponents = best.value;
   if (!best.path.length) return finish(waitAction(candidates.some(x => !x.effect) ? 'WAIT_UNKNOWN_EFFECT' : 'WAIT_EVENT'), candidates.some(x => !x.effect) ? 'WAIT_UNKNOWN_EFFECT' : 'WAIT_EVENT');
   const first = best.path[0];
+  if(best.goalId || record.reservationReview?.switched){
+    const next={...(record.reservationReview?.switched?commitment:{}),targetId:best.goalId??first.action.id,status:'saving'};
+    return first.wait>0?finish(waitAction('WAIT_TARGET',first.wait,first.action.id),'WAIT_TARGET',next):finish(first.action,best.goalId?'BUY_UNLOCK_PREREQUISITE':'BUY_BEST_PLAN',next);
+  }
   if (first.wait > 0) return finish(waitAction('WAIT_TARGET',first.wait,first.action.id),'WAIT_TARGET',{targetId:first.action.id,status:'saving'});
   return finish(first.action,'BUY_BEST_PLAN',null);
 }
 
 Object.assign(exports,{plan});
+},
+"src/core/unlocks.mjs":function(require,exports){
+const { clone }=require("src/core/contracts.mjs");
+const { allOffers,applyAction,advance,eta,eligible }=require("src/core/model.mjs");
+
+// Simulate the complete dependency cost without external side effects.
+function unlockRoute(initial,targetId,config,budget={remaining:256}){
+  let state=clone(initial),cost=0,limited=false;
+  const path=[],visiting=new Set();
+  function buy(id){
+    if(path.length>=config.maxUnlockSteps || budget.remaining<=0)throw new Error('unlock-budget');
+    let offer=allOffers(state).find(o=>o.id===id);
+    if(!offer || !offer.eligible || !offer.effect || offer.disabled)throw new Error('unavailable-prerequisite');
+    if(limited || (offer.rootOnly && path.length))throw new Error('unsupported-child-model');
+    for(let n=0;n<config.maxEvents;n++){
+      const delay=eta(state,offer.price,config.maxEvents);
+      if(!Number.isFinite(delay))throw new Error('unreachable');
+      state=advance(state,delay,config.maxEvents);
+      offer=allOffers(state).find(o=>o.id===id);
+      const after=applyAction(state,offer);
+      if(after){
+        budget.remaining--;cost+=offer.price;state=after;limited=!!offer.rootOnly;
+        const at=state.elapsed-initial.elapsed;
+        path.push({action:{id:offer.id,kind:offer.kind,operation:offer.kind==='building'?'buyBuilding':'buyUpgrade',targetId:offer.targetId,quantity:1,price:offer.price},at,wait:at-(path.at(-1)?.at??0)});return;
+      }
+      if(!offer?.eligible)throw new Error('unavailable-prerequisite');
+    }
+    throw new Error('event-budget');
+  }
+  function acquire(id){
+    if(state.owned.includes(id))return;
+    if(visiting.has(id))throw new Error('dependency-cycle');
+    if(visiting.size>=config.maxUnlockSteps)throw new Error('unlock-budget');
+    const offer=allOffers(state).find(o=>o.id===id);
+    if(!offer || offer.disabled || !offer.effect)throw new Error('unknown-prerequisite');
+    visiting.add(id);
+    for(const required of offer.requiresOwned??[])acquire(required);
+    for(const requirement of offer.requiresBuildings??[]){
+      const building=state.buildings.find(b=>b.id===requirement.id);
+      if(!building || building.disabled)throw new Error('unavailable-building');
+      while(state.buildings.find(b=>b.id===requirement.id).amount<requirement.amount)buy('building:'+requirement.id);
+    }
+    if(offer.availableAt>state.elapsed){if(limited)throw new Error('unsupported-child-model');state=advance(state,offer.availableAt-state.elapsed,config.maxEvents);}
+    if(!eligible(state,offer))throw new Error('unavailable-prerequisite');
+    buy(id);visiting.delete(id);
+  }
+  try{acquire(targetId);return {targetId,status:'known',state,path,cost,eta:state.elapsed-initial.elapsed};}
+  catch(error){return {targetId,status:'unavailable',reason:error.message,path:[],cost:null,eta:null};}
+}
+
+Object.assign(exports,{unlockRoute});
 },
 "src/runtime/executor.mjs":function(require,exports){
 const { epsilon }=require("src/core/contracts.mjs");
@@ -665,6 +805,7 @@ class Executor {
       if(!this.ownsToken())return {...receipt,status:'stale-token'};
       const a=this.adapter,bank=a.game.cookies;
       if(!a.playable() || (input.observation && a.signature()!==input.observation.signature))return {...receipt,status:'stale'};
+      if(!a.available(action))return {...receipt,status:'not-in-store'};
       const price=a.price(action.kind,action.targetId);
       if(Math.abs(price-action.price)>epsilon(price,action.price) || bank < input.state.bank-epsilon(bank,input.state.bank) || bank < price+input.state.reserve)return {...receipt,status:'stale'};
       receipt.before={marker:a.marker(action),bank};
@@ -774,13 +915,13 @@ function mountPanel(runtime,document){
   details.ontoggle=()=>render();
   function render(){
     const d=runtime.last?.decision;
-    const reasons={WAIT_TARGET:'購入資金を貯めています',BUY_TARGET:'予約対象を購入',BUY_BEST_PLAN:'成長効率を比較して購入',BUY_ADVANCES_TARGET:'目標への到達を早める購入',WAIT_EVENT:'次の変化を待っています',WAIT_UNKNOWN_EFFECT:'効果が未対応のため待機',WAIT_TARGET_UNAVAILABLE:'予約対象を再確認中',WAIT_PENDING:'購入結果を確認中'};
+    const reasons={WAIT_TARGET:'購入資金を貯めています',BUY_TARGET:'予約対象を購入',BUY_BEST_PLAN:'成長効率を比較して購入',BUY_ADVANCES_TARGET:'目標への到達を早める購入',BUY_UNLOCK_PREREQUISITE:'強化の解禁に必要な施設・前提を購入',WAIT_UNLOCK_PREREQUISITE:'強化の解禁に必要な資金を貯めています',WAIT_EVENT:'次の変化を待っています',WAIT_UNKNOWN_EFFECT:'効果が未対応のため待機',WAIT_TARGET_UNAVAILABLE:'予約対象を再確認中',WAIT_PENDING:'購入結果を確認中'};
     const target=runtime.commitment?.targetId;
     const candidate=d?.allCandidates.find(c=>c.id===(target??d.selectedAction.id));
     const name=candidate?.displayName ?? (candidate?.kind==='building'?'施設 '+candidate.targetId:(target??'なし'));
     const eta=d?.targetEta?.direct;
     status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
-    if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}
+    if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,reservationReview:d.reservationReview,comparison:d.comparison,unlockPaths:d.unlockPaths,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}
     mode.textContent=runtime.config.observeOnly?'自動化を開始':'観測モードへ';mode.disabled=runtime.stopped;
     collapse.textContent=layout.collapsed()?'展開':'折りたたむ';collapse.setAttribute('aria-expanded',String(!layout.collapsed()));
   }

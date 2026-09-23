@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir,readFile } from 'node:fs/promises';
-import { replay } from '../src/runtime/diagnostics.mjs';
+import { replay } from '../scripts/replay-engine.mjs';
 const directory=new URL('./fixtures/captured/',import.meta.url);
 for(const name of (await readdir(directory)).filter(x=>x.endsWith('.json'))){
   test('captured official Game 2.058: '+name,async()=>{

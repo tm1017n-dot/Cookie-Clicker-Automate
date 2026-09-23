@@ -10,6 +10,13 @@ const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.Up
 // Audited CalculateGains 2.058 writes root caches, these two maps and building caches.
 // Win/Unlock are disabled during measurement; only the explicitly changed upgrade is writable.
 const gainsObjects=(g,touched)=>[g,g.cookiesPsByType,g.cookiesMultByType,...collection(g.ObjectsById),...touched];
+function normalTier(g,u){
+  const b=u.buildingTie,t=g.Tiers?.[u.tier];
+  if(!b || b.id===0 || !Number.isInteger(Number(u.tier)) || !t || t.special || !Number.isInteger(t.unlock) || t.unlock<1 || b.tieredUpgrades?.[u.tier]!==u || u.buildingTie2 || u.buyFunction || u.priceFunc)return null;
+  let multiplier=2;
+  if(g.ascensionMode!==1 && b.unshackleUpgrade && t.unshackleUpgrade && g.Has?.(b.unshackleUpgrade) && g.Has?.(t.unshackleUpgrade))multiplier+=b.id===1?.5:(20-b.id)*.1;
+  return {buildingId:b.id,amount:t.unlock,multiplier};
+}
 
 export class GameAdapter {
   constructor(getGame, { supportedVersions = ['2.058'] } = {}) {
@@ -49,6 +56,10 @@ export class GameAdapter {
   marker(action) {
     const g = this.game;
     return action.operation === 'buyBuilding' ? g.ObjectsById[action.targetId]?.amount : g.UpgradesById[action.targetId]?.bought;
+  }
+  available(action){
+    const g=this.game;
+    return action.kind==='upgrade'?(g.UpgradesInStore??[]).some(u=>u.id===action.targetId):!!g.ObjectsById[action.targetId]&&!g.ObjectsById[action.targetId].locked;
   }
   runIdentity() { const g=this.game; return JSON.stringify([g.startDate??null,g.fullDate??null,g.resets??0]); }
   signature() {
@@ -94,13 +105,23 @@ export class GameAdapter {
         rootOnly:crossEffect, measurement:{passive:passiveDelta,mouse:clickDelta} };
     });
     const offered = new Set((g.UpgradesInStore || []).map(u => u.id));
-    const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2)).map(u => {
+    const nextTiers=new Map();
+    for(const u of collection(g.UpgradesById)){
+      const tier=normalTier(g,u);if(u.bought || u.unlocked || !tier)continue;
+      const current=nextTiers.get(tier.buildingId);
+      if(!current || tier.amount<current.tier.amount || (tier.amount===current.tier.amount && u.id<current.upgrade.id))nextTiers.set(tier.buildingId,{upgrade:u,tier});
+    }
+    const futureIds=new Set([...nextTiers.values()].map(x=>x.upgrade.id));
+    const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2 || futureIds.has(u.id))).map(u => {
       const price = this.price('upgrade',u.id);
+      const tier=normalTier(g,u),future=futureIds.has(u.id) && !offered.has(u.id);
       const disallowed = ['prestige','debug','toggle'].includes(u.pool) || Boolean(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask);
-      const measured = this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
-      const passiveDelta = measured.passive-steady.passive, mouseDelta = measured.mouse-steady.mouse;
+      // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
+      const measured = future?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
+      const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
+      else if(tier){effect={buildingMultipliers:[{id:tier.buildingId,multiplier:tier.multiplier}]};rootOnly=false;confidence='high';}
       else if (u.buildingTie && u.tier != null && !u.buildingTie1 && passiveDelta > 0) {
         const b = buildings.find(b => b.id === u.buildingTie.id);
         if (b && b.amount*b.unitCps > 0) {
@@ -108,21 +129,22 @@ export class GameAdapter {
           if (Math.abs(mouseDelta-fraction*passiveDelta)>Math.max(1e-8,Math.abs(mouseDelta)*1e-6)) rootOnly=true;
         }
       }
-      if (effect && !rootOnly) {
+      if (measured && effect && !rootOnly) {
         const prediction=effectDelta({passive:steady.passive-buildings.reduce((n,b)=>n+b.amount*b.unitCps,0),buildings,
           buffs:[],clickUnit:steady.mouse-fraction*steady.passive,clickFraction:fraction,nonCursorClick:0,clickRate:1}, {effect});
         const agrees=(a,b)=>Math.abs(a-b)<=Math.max(1e-8,Math.abs(b)*1e-6);
         if(!agrees(prediction.click,mouseDelta) || !agrees(prediction.liquid-prediction.click,passiveDelta))rootOnly=true;
       }
       if (!effect || rootOnly) {
+        effect=null;
         if (passiveDelta !== 0 || mouseDelta !== 0) { effect={flatPassive:passiveDelta,flatClick:mouseDelta-fraction*passiveDelta}; confidence='medium'; }
       }
       const available = offered.has(u.id);
       return {id:'upgrade:'+u.id,kind:'upgrade',targetId:u.id,price,effect,rootOnly,confidence,
         internalName:u.name,displayName:u.dname ?? u.name,pool:u.pool ?? '',
-        disabled:disallowed || (!available && u.id>2),
-        requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : [],
-        evidence:[{source:'Game.CalculateGains',coverage:u.buyFunction?'bought-only':'production',passiveDelta,mouseDelta}],
+        disabled:disallowed || (!available && u.id>2 && !future),
+        requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : future?[{id:tier.buildingId,amount:tier.amount}]:[],
+        evidence:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains',coverage:u.buyFunction?'bought-only':'production',passiveDelta,mouseDelta}],
         warnings:disallowed?['special-operation-not-enabled']:(effect?[]:['unknown-effect'])};
     });
     const sum = buildings.reduce((n,b) => n+b.unitCps*b.amount,0);

@@ -13,6 +13,7 @@ export class Executor {
       if(!this.ownsToken())return {...receipt,status:'stale-token'};
       const a=this.adapter,bank=a.game.cookies;
       if(!a.playable() || (input.observation && a.signature()!==input.observation.signature))return {...receipt,status:'stale'};
+      if(!a.available(action))return {...receipt,status:'not-in-store'};
       const price=a.price(action.kind,action.targetId);
       if(Math.abs(price-action.price)>epsilon(price,action.price) || bank < input.state.bank-epsilon(bank,input.state.bank) || bank < price+input.state.reserve)return {...receipt,status:'stale'};
       receipt.before={marker:a.marker(action),bank};
