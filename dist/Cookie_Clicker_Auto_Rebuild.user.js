@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.6
+// @version 9.0.0-alpha.7
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
 // @grant none
@@ -250,7 +250,7 @@ class GameAdapter {
 Object.assign(exports,{GameAdapter});
 },
 "src/core/contracts.mjs":function(require,exports){
-const ENGINE_VERSION = '9.0.0-alpha.6';
+const ENGINE_VERSION = '9.0.0-alpha.7';
 const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
@@ -499,7 +499,14 @@ function advance(state, seconds, maxEvents = 4096) {
 }
 function eta(state, price, maxEvents = 4096) {
   if (price == null || !Number.isFinite(price)) return Infinity;
-  let s = advance(state, 0, maxEvents), elapsed = 0;
+  if(!state.events.length && !state.buffs.length){
+    const need=price+state.reserve-state.bank;
+    if(need<=epsilon(price+state.reserve,state.bank))return 0;
+    const rate=income(state).liquid;
+    return rate>0?need/rate:Infinity;
+  }
+  // Forecast rewards never enter liquid funds; omit their copying and simulation.
+  let s = advance({...state,golden:null}, 0, maxEvents), elapsed = 0;
   for (let n = 0; n < maxEvents; n++) {
     const need = price + s.reserve - s.bank;
     if (need <= epsilon(price + s.reserve, s.bank)) return elapsed;
@@ -514,7 +521,7 @@ function eta(state, price, maxEvents = 4096) {
 }
 function effectDelta(s, offer, riskWeight = .1) {
   if (!offer.effect) return null;
-  const before = income(s), after = copyState(s);
+  const before = income(s), after = copyState(offer.effect.golden?s:{...s,golden:null});
   applyEffect(after, offer.effect);
   const out = income(after);
   let expected=0;
@@ -809,7 +816,7 @@ const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.6';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.7';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -905,12 +912,15 @@ const { goldenSummary }=require("src/core/golden.mjs");
 
 const waitAction = (reason, seconds = null, targetId = null) => ({ id: 'wait', kind: 'wait', operation: 'waitUntil', targetId, price: 0, waitSeconds: seconds, reason });
 const buyAction = o => ({ id: o.id, kind: o.kind, operation: o.kind === 'building' ? 'buyBuilding' : 'buyUpgrade', targetId: o.targetId, quantity: 1, price: o.price });
-function values(s, rootElapsed, horizons, config) {
+function values(s, rootElapsed, horizons, config, forecasts = null) {
+  let end=s;
   return horizons.map(h => {
-    const remaining = h - (s.elapsed - rootElapsed);
+    const remaining = h - (end.elapsed - rootElapsed);
     if (remaining < 0) return null;
-    const end = advance(s, remaining, config.maxEvents);
-    return end.bank + end.deferred + goldenSummary(end.golden,config.riskWeight).value;
+    end = advance(end, remaining, config.maxEvents);
+    const forecast=goldenSummary(end.golden,config.riskWeight);
+    if(forecasts)forecasts.push({seconds:h,...forecast});
+    return end.bank + end.deferred + forecast.value;
   });
 }
 function dominates(a, b) { return a.every((v,i) => v >= b[i] - epsilon(v,b[i])) && a.some((v,i) => v > b[i] + epsilon(v,b[i])); }
@@ -954,15 +964,15 @@ function plan(input) {
   }
   horizons[1] = Math.max(horizons[1], horizons[2]/3);
   if (horizons.some(h => !Number.isFinite(h))) throw new Error('horizon-overflow');
-  const baseline = values(s,s.elapsed,horizons,c);
-  const forecast = (state,h) => ({seconds:h,...goldenSummary(advance(state,h-(state.elapsed-s.elapsed),c.maxEvents).golden,c.riskWeight)});
+  const baselineForecast=[];
+  const baseline = values(s,s.elapsed,horizons,c,baselineForecast);
   const score = v => v.reduce((sum,x,i) => sum + c.weights[i] * (x-baseline[i])/Math.max(1,Math.abs(baseline[i]),s.bank), 0);
   const record = { schemaVersion: 1, finalLayer: 'planner', horizons, strategyWeights: c.weights,
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
     targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
     unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null,
-    goldenModel:s.golden?{samples:s.golden.lanes.length,seed:s.golden.seed,maxSeconds:s.golden.maxSeconds,maxEvents:s.golden.maxEvents,riskWeight:c.riskWeight,baseline:horizons.map(h=>forecast(s,h)),omitted:['chain-rewards','storm-rewards','drops','discount-buffs']}:null,
+    goldenModel:s.golden?{samples:s.golden.lanes.length,seed:s.golden.seed,maxSeconds:s.golden.maxSeconds,maxEvents:s.golden.maxEvents,riskWeight:c.riskWeight,baseline:baselineForecast,omitted:['chain-rewards','storm-rewards','drops','discount-buffs']}:null,
     coverage:{unmodeledAffordable:candidates.filter(o=>o.affordable&&!o.effect&&!o.disabled).map(o=>o.id),
       unmodeled:candidates.filter(o=>!o.effect&&!o.disabled).map(o=>o.id),disabled:candidates.filter(o=>o.disabled).map(o=>o.id)} };
   function finish(action, reason, next = commitment) { record.selectedAction = action; record.reasonCode = reason; record.nextCommitment = next; return record; }
@@ -999,14 +1009,15 @@ function plan(input) {
       for (const o of allOffers(node.state)) {
         if (!o.eligible || !o.effect || (o.rootOnly && depth > 0)) continue;
         if (nodeId > c.maxNodes) { warnings.push('node-budget'); break; }
-        const wait = eta(node.state,o.price,c.maxEvents);
+        const cached = depth===0?singleById.get(o.id):null;
+        const wait = cached?cached.path[0].wait:eta(node.state,o.price,c.maxEvents);
         if (!Number.isFinite(wait) || node.state.elapsed - s.elapsed + wait >= horizons[2]) continue;
-        const ready = advance(node.state,wait,c.maxEvents);
-        const currentOffer = offerById(ready,o.id);
-        const after = applyAction(ready,currentOffer);
+        const ready = cached?null:advance(node.state,wait,c.maxEvents);
+        const currentOffer = cached?cached.path[0].action:offerById(ready,o.id);
+        const after = cached?cached.state:applyAction(ready,currentOffer);
         if (!after) continue;
-        const path = [...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
-        const v = extendValues(node,after);
+        const path = cached?cached.path:[...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
+        const v = cached?cached.value:extendValues(node,after);
         const next = { id: nodeId++, state: after, path, value: v, score: score(v), terminalOnly:!!o.rootOnly };
         nextLevel.push(next); terminals.push(next);
         record.expandedNodes.push({ id:next.id,parentId:node.id,actionId:o.id,at:after.elapsed-s.elapsed,value:v });
@@ -1028,7 +1039,7 @@ function plan(input) {
     const entry={targetId:route.targetId,status:route.status,reason:route.reason??null,totalCost:route.cost,eta:route.eta,steps:route.path};record.unlockPaths.push(entry);
     if(route.status!=='known' || route.eta>=horizons[2])continue;
     const value=pathValues(route.path);entry.value=value;
-    if(route.path.length>c.depth || offers.find(o=>o.id===route.targetId)?.research || offers.find(o=>o.id===route.targetId)?.requiresAchievements){entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});}
+    entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});
   }
   const comparable=terminals.filter(n=>{
     if(n.path.length<=1 || !Number.isFinite(partialFloor))return true;

@@ -1,5 +1,7 @@
 # 再構築・詳細設計パッケージ
 
+解禁経路の比較漏れ・重複計算の改善は[STRATEGY_ALPHA7](STRATEGY_ALPHA7.md)を参照。
+
 相乗効果・Kitten・自然GC・研究経路の変更は[STRATEGY_ALPHA6](STRATEGY_ALPHA6.md)を参照。
 
 作成日: 2026-09-23 / 設計版: 1.0 / 状態: 実装前・検証前

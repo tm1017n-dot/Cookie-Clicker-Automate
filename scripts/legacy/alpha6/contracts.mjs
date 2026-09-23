@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = '9.0.0-alpha.7';
+export const ENGINE_VERSION = '9.0.0-alpha.6';
 export const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],

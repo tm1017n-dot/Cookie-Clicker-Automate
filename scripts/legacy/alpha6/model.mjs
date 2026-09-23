@@ -126,14 +126,7 @@ export function advance(state, seconds, maxEvents = 4096) {
 }
 export function eta(state, price, maxEvents = 4096) {
   if (price == null || !Number.isFinite(price)) return Infinity;
-  if(!state.events.length && !state.buffs.length){
-    const need=price+state.reserve-state.bank;
-    if(need<=epsilon(price+state.reserve,state.bank))return 0;
-    const rate=income(state).liquid;
-    return rate>0?need/rate:Infinity;
-  }
-  // Forecast rewards never enter liquid funds; omit their copying and simulation.
-  let s = advance({...state,golden:null}, 0, maxEvents), elapsed = 0;
+  let s = advance(state, 0, maxEvents), elapsed = 0;
   for (let n = 0; n < maxEvents; n++) {
     const need = price + s.reserve - s.bank;
     if (need <= epsilon(price + s.reserve, s.bank)) return elapsed;
@@ -148,7 +141,7 @@ export function eta(state, price, maxEvents = 4096) {
 }
 export function effectDelta(s, offer, riskWeight = .1) {
   if (!offer.effect) return null;
-  const before = income(s), after = copyState(offer.effect.golden?s:{...s,golden:null});
+  const before = income(s), after = copyState(s);
   applyEffect(after, offer.effect);
   const out = income(after);
   let expected=0;

@@ -5,15 +5,12 @@ import { goldenSummary } from './golden.mjs';
 
 const waitAction = (reason, seconds = null, targetId = null) => ({ id: 'wait', kind: 'wait', operation: 'waitUntil', targetId, price: 0, waitSeconds: seconds, reason });
 const buyAction = o => ({ id: o.id, kind: o.kind, operation: o.kind === 'building' ? 'buyBuilding' : 'buyUpgrade', targetId: o.targetId, quantity: 1, price: o.price });
-function values(s, rootElapsed, horizons, config, forecasts = null) {
-  let end=s;
+function values(s, rootElapsed, horizons, config) {
   return horizons.map(h => {
-    const remaining = h - (end.elapsed - rootElapsed);
+    const remaining = h - (s.elapsed - rootElapsed);
     if (remaining < 0) return null;
-    end = advance(end, remaining, config.maxEvents);
-    const forecast=goldenSummary(end.golden,config.riskWeight);
-    if(forecasts)forecasts.push({seconds:h,...forecast});
-    return end.bank + end.deferred + forecast.value;
+    const end = advance(s, remaining, config.maxEvents);
+    return end.bank + end.deferred + goldenSummary(end.golden,config.riskWeight).value;
   });
 }
 function dominates(a, b) { return a.every((v,i) => v >= b[i] - epsilon(v,b[i])) && a.some((v,i) => v > b[i] + epsilon(v,b[i])); }
@@ -57,15 +54,15 @@ export function plan(input) {
   }
   horizons[1] = Math.max(horizons[1], horizons[2]/3);
   if (horizons.some(h => !Number.isFinite(h))) throw new Error('horizon-overflow');
-  const baselineForecast=[];
-  const baseline = values(s,s.elapsed,horizons,c,baselineForecast);
+  const baseline = values(s,s.elapsed,horizons,c);
+  const forecast = (state,h) => ({seconds:h,...goldenSummary(advance(state,h-(state.elapsed-s.elapsed),c.maxEvents).golden,c.riskWeight)});
   const score = v => v.reduce((sum,x,i) => sum + c.weights[i] * (x-baseline[i])/Math.max(1,Math.abs(baseline[i]),s.bank), 0);
   const record = { schemaVersion: 1, finalLayer: 'planner', horizons, strategyWeights: c.weights,
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
     targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
     unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null,
-    goldenModel:s.golden?{samples:s.golden.lanes.length,seed:s.golden.seed,maxSeconds:s.golden.maxSeconds,maxEvents:s.golden.maxEvents,riskWeight:c.riskWeight,baseline:baselineForecast,omitted:['chain-rewards','storm-rewards','drops','discount-buffs']}:null,
+    goldenModel:s.golden?{samples:s.golden.lanes.length,seed:s.golden.seed,maxSeconds:s.golden.maxSeconds,maxEvents:s.golden.maxEvents,riskWeight:c.riskWeight,baseline:horizons.map(h=>forecast(s,h)),omitted:['chain-rewards','storm-rewards','drops','discount-buffs']}:null,
     coverage:{unmodeledAffordable:candidates.filter(o=>o.affordable&&!o.effect&&!o.disabled).map(o=>o.id),
       unmodeled:candidates.filter(o=>!o.effect&&!o.disabled).map(o=>o.id),disabled:candidates.filter(o=>o.disabled).map(o=>o.id)} };
   function finish(action, reason, next = commitment) { record.selectedAction = action; record.reasonCode = reason; record.nextCommitment = next; return record; }
@@ -102,15 +99,14 @@ export function plan(input) {
       for (const o of allOffers(node.state)) {
         if (!o.eligible || !o.effect || (o.rootOnly && depth > 0)) continue;
         if (nodeId > c.maxNodes) { warnings.push('node-budget'); break; }
-        const cached = depth===0?singleById.get(o.id):null;
-        const wait = cached?cached.path[0].wait:eta(node.state,o.price,c.maxEvents);
+        const wait = eta(node.state,o.price,c.maxEvents);
         if (!Number.isFinite(wait) || node.state.elapsed - s.elapsed + wait >= horizons[2]) continue;
-        const ready = cached?null:advance(node.state,wait,c.maxEvents);
-        const currentOffer = cached?cached.path[0].action:offerById(ready,o.id);
-        const after = cached?cached.state:applyAction(ready,currentOffer);
+        const ready = advance(node.state,wait,c.maxEvents);
+        const currentOffer = offerById(ready,o.id);
+        const after = applyAction(ready,currentOffer);
         if (!after) continue;
-        const path = cached?cached.path:[...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
-        const v = cached?cached.value:extendValues(node,after);
+        const path = [...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
+        const v = extendValues(node,after);
         const next = { id: nodeId++, state: after, path, value: v, score: score(v), terminalOnly:!!o.rootOnly };
         nextLevel.push(next); terminals.push(next);
         record.expandedNodes.push({ id:next.id,parentId:node.id,actionId:o.id,at:after.elapsed-s.elapsed,value:v });
@@ -132,7 +128,7 @@ export function plan(input) {
     const entry={targetId:route.targetId,status:route.status,reason:route.reason??null,totalCost:route.cost,eta:route.eta,steps:route.path};record.unlockPaths.push(entry);
     if(route.status!=='known' || route.eta>=horizons[2])continue;
     const value=pathValues(route.path);entry.value=value;
-    entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});
+    if(route.path.length>c.depth || offers.find(o=>o.id===route.targetId)?.research || offers.find(o=>o.id===route.targetId)?.requiresAchievements){entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});}
   }
   const comparable=terminals.filter(n=>{
     if(n.path.length<=1 || !Number.isFinite(partialFloor))return true;
