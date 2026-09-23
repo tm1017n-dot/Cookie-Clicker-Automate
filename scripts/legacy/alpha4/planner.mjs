@@ -1,5 +1,5 @@
 import { validateInput, clone, known, unknown, epsilon } from './contracts.mjs';
-import { income, allOffers, offerById, applyAction, advance, eta, effectDelta } from './model.mjs';
+import { income, allOffers, applyAction, advance, eta, effectDelta } from './model.mjs';
 import { unlockRoute } from './unlocks.mjs';
 
 const waitAction = (reason, seconds = null, targetId = null) => ({ id: 'wait', kind: 'wait', operation: 'waitUntil', targetId, price: 0, waitSeconds: seconds, reason });
@@ -55,29 +55,22 @@ export function plan(input) {
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
     targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
-    unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null,
-    coverage:{unmodeledAffordable:candidates.filter(o=>o.affordable&&!o.effect&&!o.disabled).map(o=>o.id),
-      unmodeled:candidates.filter(o=>!o.effect&&!o.disabled).map(o=>o.id),disabled:candidates.filter(o=>o.disabled).map(o=>o.id)} };
+    unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null };
   function finish(action, reason, next = commitment) { record.selectedAction = action; record.reasonCode = reason; record.nextCommitment = next; return record; }
   if (s.pendingExecution) return finish(waitAction('WAIT_PENDING'), 'WAIT_PENDING');
   if(commitment && target?.eligible && target.effect && eta(s,target.price,c.maxEvents)===0)return finish(buyAction(target),'BUY_TARGET',{...commitment,status:'ready'});
   function pathValues(path){return horizons.map(h=>{
     let at=s;
-    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,offerById(at,step.action.id));if(!at)throw new Error('invalid-simulation-path');}
+    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,allOffers(at).find(x=>x.id===step.action.id));if(!at)throw new Error('invalid-simulation-path');}
     return values(at,s.elapsed,[h],c)[0];
   });}
-  // Earlier horizons keep their parent's continuation value; only the new tail changes.
-  function extendValues(parent,after){
-    const continuation=values(after,s.elapsed,horizons,c);
-    return continuation.map((v,i)=>v===null?parent.value[i]:v);
-  }
   const root = { id: 0, state: s, path: [], value: baseline, score: 0 };
   const singles=[];
   for(const o of offers){
     if(!o.eligible || !o.effect)continue;
     const wait=eta(s,o.price,c.maxEvents);if(!Number.isFinite(wait) || wait>=horizons[2])continue;
-    const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=applyAction(ready,current);if(!after)continue;
-    const path=[{action:buyAction(current),at:after.elapsed-s.elapsed,wait}],value=extendValues(root,after);
+    const ready=advance(s,wait,c.maxEvents),current=allOffers(ready).find(x=>x.id===o.id),after=applyAction(ready,current);if(!after)continue;
+    const path=[{action:buyAction(current),at:after.elapsed-s.elapsed,wait}],value=pathValues(path);
     singles.push({id:-singles.length-1,state:after,path,value,score:score(value),terminalOnly:!!o.rootOnly});
   }
   const singleById=new Map(singles.map(n=>[n.path[0].action.id,n]));
@@ -95,11 +88,11 @@ export function plan(input) {
         const wait = eta(node.state,o.price,c.maxEvents);
         if (!Number.isFinite(wait) || node.state.elapsed - s.elapsed + wait >= horizons[2]) continue;
         const ready = advance(node.state,wait,c.maxEvents);
-        const currentOffer = offerById(ready,o.id);
+        const currentOffer = allOffers(ready).find(x => x.id === o.id);
         const after = applyAction(ready,currentOffer);
         if (!after) continue;
         const path = [...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
-        const v = extendValues(node,after);
+        const v = pathValues(path);
         const next = { id: nodeId++, state: after, path, value: v, score: score(v), terminalOnly:!!o.rootOnly };
         nextLevel.push(next); terminals.push(next);
         record.expandedNodes.push({ id:next.id,parentId:node.id,actionId:o.id,at:after.elapsed-s.elapsed,value:v });
@@ -181,10 +174,7 @@ export function plan(input) {
   }
   record.plannedSteps = best.path;
   record.objectiveComponents = best.value;
-  if (!best.path.length) {
-    const reason=record.coverage.unmodeledAffordable.length?'WAIT_UNKNOWN_EFFECT':'WAIT_NO_PROFITABLE_PLAN';
-    return finish(waitAction(reason),reason);
-  }
+  if (!best.path.length) return finish(waitAction(candidates.some(x => !x.effect) ? 'WAIT_UNKNOWN_EFFECT' : 'WAIT_EVENT'), candidates.some(x => !x.effect) ? 'WAIT_UNKNOWN_EFFECT' : 'WAIT_EVENT');
   const first = best.path[0];
   if(best.goalId || record.reservationReview?.switched){
     const next={...(record.reservationReview?.switched?commitment:{}),targetId:best.goalId??first.action.id,status:'saving'};

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.4
+// @version 9.0.0-alpha.5
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
 // @grant none
@@ -33,6 +33,7 @@ Object.assign(exports,{boot});
 const { makeInput, clone, freeze, RULESET_VERSION }=require("src/core/contracts.mjs");
 const { Journal }=require("src/game/journal.mjs");
 const { effectDelta }=require("src/core/model.mjs");
+const { refreshOnly,metadataEffect,eggPriceEffects,unroundedUpgradePrice }=require("src/game/effects.mjs");
 
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
@@ -62,7 +63,7 @@ class GameAdapter {
     if (g.ascensionMode) throw new Error('unsupported-ascension-mode');
     if (Object.keys(g.mods || {}).length || Object.values(g.modHooks || {}).some(x => Array.isArray(x) && x.length)) throw new Error('unreviewed-mod-hooks');
   }
-  measure(change, touched = null) {
+  measure(change, touched = null, probeMouse = false) {
     if (this.busy || this.fault) throw new Error(this.fault || 'adapter-busy');
     this.audit();
     const g = this.game, journal = new Journal(touched===null?objects(g):gainsObjects(g,touched));
@@ -72,8 +73,10 @@ class GameAdapter {
       // The gains pass mutates caches; all root primitives and entity descriptors are journaled.
       change(g);
       g.CalculateGains();
-      return { passive: finite(g.cookiesPs,'passive'), mouse: finite(g.mouseCps(),'mouse'),
+      const result={ passive: finite(g.cookiesPs,'passive'), mouse: finite(g.mouseCps(),'mouse'),
         global: finite(g.globalCpsMult ?? 1,'multiplier') };
+      if(probeMouse){const step=Math.max(1,Math.abs(g.cookiesPs));g.cookiesPs+=step;result.fraction=Math.max(0,(finite(g.mouseCps(),'mouse')-result.mouse)/step);}
+      return result;
     } finally {
       try { journal.restore(); } catch (error) { this.fault = 'reload-required:' + error.message; throw error; }
       finally { this.busy = false; }
@@ -112,16 +115,8 @@ class GameAdapter {
     const buffs = Object.values(g.buffs || {}).map(b => ({ id:b.id ?? b.name, remaining:Math.max(0,b.time/g.fps),
       passive:b.multCpS ?? 1,click:b.multClick ?? 1 }));
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
-    const steady = this.measure(x => { x.buffs = {}; }, []);
-    // Derive CpS-linked mouse contribution from the live formula, without invoking a click.
-    const journal = new Journal(gainsObjects(g,[]));
-    let fraction;
-    try {
-      g.buffs = {}; g.CalculateGains();
-      const base = g.cookiesPs, mouse = g.mouseCps(), step = Math.max(1,Math.abs(base));
-      g.cookiesPs = base + step;
-      fraction = Math.max(0,(g.mouseCps() - mouse) / step);
-    } finally { try { journal.restore(); } catch (e) { this.fault = 'reload-required:' + e.message; throw e; } }
+    const steady = this.measure(x => { x.buffs = {}; }, [], true);
+    const fraction=steady.fraction;
     const buildings = collection(g.ObjectsById).map(b => {
       const price = this.price('building',b.id);
       const unit = Math.max(0,(b.storedCps ?? (b.amount ? b.storedTotalCps/b.amount : 0)) * steady.global);
@@ -147,13 +142,14 @@ class GameAdapter {
     const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2 || futureIds.has(u.id))).map(u => {
       const price = this.price('upgrade',u.id);
       const tier=normalTier(g,u),future=futureIds.has(u.id) && !offered.has(u.id);
-      const disallowed = ['prestige','debug','toggle'].includes(u.pool) || Boolean(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask);
+      const disallowed = ['prestige','debug','toggle'].includes(u.pool) || !refreshOnly(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask) || (u.priceLumps??0)>0;
       // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
-      const measured = future?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
+      const measured = future||disallowed?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
       const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
       else if(tier){effect={buildingMultipliers:[{id:tier.buildingId,multiplier:tier.multiplier}]};rootOnly=false;confidence='high';}
+      else if(metadataEffect(g,u)){effect=metadataEffect(g,u);rootOnly=false;confidence='high';}
       else if (u.buildingTie && u.tier != null && !u.buildingTie1 && passiveDelta > 0) {
         const b = buildings.find(b => b.id === u.buildingTie.id);
         if (b && b.amount*b.unitCps > 0) {
@@ -163,7 +159,7 @@ class GameAdapter {
       }
       if (measured && effect && !rootOnly) {
         const prediction=effectDelta({passive:steady.passive-buildings.reduce((n,b)=>n+b.amount*b.unitCps,0),buildings,
-          buffs:[],clickUnit:steady.mouse-fraction*steady.passive,clickFraction:fraction,nonCursorClick:0,clickRate:1}, {effect});
+          buffs:[],offers:[],clickUnit:steady.mouse-fraction*steady.passive,clickFraction:fraction,nonCursorClick:0,clickRate:1}, {effect});
         const agrees=(a,b)=>Math.abs(a-b)<=Math.max(1e-8,Math.abs(b)*1e-6);
         if(!agrees(prediction.click,mouseDelta) || !agrees(prediction.liquid-prediction.click,passiveDelta))rootOnly=true;
       }
@@ -171,12 +167,15 @@ class GameAdapter {
         effect=null;
         if (passiveDelta !== 0 || mouseDelta !== 0) { effect={flatPassive:passiveDelta,flatClick:mouseDelta-fraction*passiveDelta}; confidence='medium'; }
       }
+      const eggFactors=eggPriceEffects(g,u);
+      if(effect && eggFactors.length)effect={...effect,upgradePriceFactors:eggFactors};
+      const rawPrice=unroundedUpgradePrice(g,u,price);
       const available = offered.has(u.id);
-      return {id:'upgrade:'+u.id,kind:'upgrade',targetId:u.id,price,effect,rootOnly,confidence,
+      return {id:'upgrade:'+u.id,kind:'upgrade',targetId:u.id,price,unroundedPrice:rawPrice??price,unverifiedPrice:rawPrice===null,effect,rootOnly,confidence,
         internalName:u.name,displayName:u.dname ?? u.name,pool:u.pool ?? '',
         disabled:disallowed || (!available && u.id>2 && !future),
         requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : future?[{id:tier.buildingId,amount:tier.amount}]:[],
-        evidence:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains',coverage:u.buyFunction?'bought-only':'production',passiveDelta,mouseDelta}],
+        evidence:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains + audited metadata',coverage:disallowed?'disabled':!rootOnly?'reusable':'current-state-production',passiveDelta,mouseDelta}],
         warnings:disallowed?['special-operation-not-enabled']:(effect?[]:['unknown-effect'])};
     });
     const sum = buildings.reduce((n,b) => n+b.unitCps*b.amount,0);
@@ -232,8 +231,8 @@ class GameAdapter {
 Object.assign(exports,{GameAdapter});
 },
 "src/core/contracts.mjs":function(require,exports){
-const ENGINE_VERSION = '9.0.0-alpha.4';
-const RULESET_VERSION = 'cc-web-2.058/basic-2';
+const ENGINE_VERSION = '9.0.0-alpha.5';
+const RULESET_VERSION = 'cc-web-2.058/basic-3';
 const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
@@ -339,6 +338,12 @@ Object.assign(exports,{Journal});
 "src/core/model.mjs":function(require,exports){
 const { clone, epsilon }=require("src/core/contracts.mjs");
 
+// Copy only writable simulation data. Effects, prerequisites and evidence are immutable.
+function copyState(s) {
+  return {...s,buildings:s.buildings.map(b=>({...b})),offers:s.offers?.map(o=>({...o})),
+    owned:s.owned?.slice(),buffs:s.buffs.map(b=>({...b})),events:s.events?.slice()};
+}
+
 function income(s) {
   const raw = Math.max(0, s.passive + s.buildings.reduce((sum, b) => sum + b.amount * b.unitCps, 0));
   const passiveMult = s.buffs.reduce((m, b) => m * b.passive, 1);
@@ -357,6 +362,7 @@ function buildingPrice(b) {
 }
 function eligible(s, o) {
   if (s.owned.includes(o.id) || o.disabled || o.price === null) return false;
+  if (s.pricesChanged && o.unverifiedPrice) return false;
   if (o.requiresOwned?.some(id => !s.owned.includes(id))) return false;
   if (o.requiresBuildings?.some(r => (s.buildings.find(b => b.id === r.id)?.amount ?? 0) < r.amount)) return false;
   if (o.availableAt != null && s.elapsed < o.availableAt) return false;
@@ -366,6 +372,12 @@ function allOffers(s) {
   return [...s.buildings.filter(b => !b.disabled).map(b => ({ id: 'building:' + b.id, kind: 'building', targetId: b.id,
     price: buildingPrice(b), effect: b.effectOverride ?? { building: b.id }, rootOnly:!!b.rootOnly, confidence: 'high', eligible: true })),
     ...s.offers.map(o => ({ ...o, eligible: eligible(s, o) }))].sort((a,b) => a.id.localeCompare(b.id, 'en'));
+}
+function offerById(s,id) {
+  const b=s.buildings.find(b=>'building:'+b.id===id);
+  if(b)return b.disabled?undefined:{id,kind:'building',targetId:b.id,price:buildingPrice(b),effect:b.effectOverride??{building:b.id},rootOnly:!!b.rootOnly,confidence:'high',eligible:true};
+  const o=s.offers.find(o=>o.id===id);
+  return o?{...o,eligible:eligible(s,o)}:undefined;
 }
 function applyEffect(s, e) {
   if (e.building != null) s.buildings.find(b => b.id === e.building).amount++;
@@ -386,15 +398,24 @@ function applyEffect(s, e) {
     const b = s.buildings.find(x => x.id === m.id);
     if (b) b.unitCps *= m.multiplier;
   }
-  if (e.priceMultiplier != null) {
-    for (const b of s.buildings) { b.nextPrice = Math.ceil(b.nextPrice * e.priceMultiplier); b.unroundedNextPrice = (b.unroundedNextPrice ?? b.nextPrice / e.priceMultiplier) * e.priceMultiplier; }
-    for (const o of s.offers) if (o.price !== null) o.price *= e.priceMultiplier;
+  const buildingDiscount=e.buildingPriceMultiplier??e.priceMultiplier;
+  const upgradeDiscount=e.upgradePriceMultiplier??e.priceMultiplier;
+  if (buildingDiscount != null) {
+    for (const b of s.buildings) { b.unroundedNextPrice=(b.unroundedNextPrice??b.nextPrice)*buildingDiscount; b.nextPrice=Math.ceil(b.unroundedNextPrice); }
+  }
+  if (upgradeDiscount != null) {
+    for (const o of s.offers) if (o.price !== null) { o.unroundedPrice=(o.unroundedPrice??o.price)*upgradeDiscount; o.price=Math.ceil(o.unroundedPrice); }
+    s.pricesChanged=true;
+  }
+  for(const m of e.upgradePriceFactors??[]){
+    const o=s.offers?.find(o=>o.id===m.id);
+    if(o && o.price!==null){o.unroundedPrice=(o.unroundedPrice??o.price)*m.multiplier;o.price=Math.ceil(o.unroundedPrice);}
   }
   if (e.reward) { s.bank += e.reward; s.earned += e.reward; }
   if (e.buff) s.buffs.push(clone(e.buff));
 }
 function applyAction(state, offer) {
-  const s = clone(state);
+  const s = copyState(state);
   if (!offer?.effect || !offer.eligible || s.bank + epsilon(s.bank, offer.price) < offer.price + s.reserve) return null;
   s.bank = Math.max(0, s.bank - offer.price);
   applyEffect(s, offer.effect);
@@ -403,7 +424,7 @@ function applyAction(state, offer) {
 }
 function advance(state, seconds, maxEvents = 4096) {
   if (!Number.isFinite(seconds) || seconds < 0) throw new TypeError('invalid duration');
-  const s = clone(state);
+  const s = copyState(state);
   for (const e of s.events.filter(e => e.at <= s.elapsed)) applyEffect(s, e.effect ?? {});
   s.events = s.events.filter(e => e.at > s.elapsed);
   s.buffs = s.buffs.filter(b => b.remaining > 0);
@@ -443,13 +464,61 @@ function eta(state, price, maxEvents = 4096) {
 }
 function effectDelta(s, offer) {
   if (!offer.effect) return null;
-  const before = income(s), after = clone(s);
+  const before = income(s), after = copyState(s);
   applyEffect(after, offer.effect);
   const out = income(after);
   return { liquid: out.liquid - before.liquid, click: out.click - before.click, economic: out.economic - before.economic };
 }
 
-Object.assign(exports,{income,buildingPrice,eligible,allOffers,applyEffect,applyAction,advance,eta,effectDelta});
+Object.assign(exports,{copyState,income,buildingPrice,eligible,allOffers,offerById,applyEffect,applyAction,advance,eta,effectDelta});
+},
+"src/game/effects.mjs":function(require,exports){
+// Audited against Web 2.058. Keys are engine dictionary keys, never translated labels.
+const priceRules=[
+  ['Season savings',{buildingPriceMultiplier:.99}],
+  ['Toy workshop',{upgradePriceMultiplier:.95}],
+  ["Santa's dominion",{passiveMultiplier:1.2,buildingPriceMultiplier:.99,upgradePriceMultiplier:.98}],
+  ['Faberge egg',{buildingPriceMultiplier:.99,upgradePriceMultiplier:.99}],
+  ['Fortune #100',{passiveMultiplier:1.01,buildingPriceMultiplier:.99,upgradePriceMultiplier:.99}],
+  ['Wrinkler ambergris',{passiveMultiplier:1.06,upgradePriceMultiplier:.99}]
+];
+function refreshOnly(callback){
+  if(!callback)return true;
+  const source=Function.prototype.toString.call(callback).replace(/\s+/g,'');
+  return /^(?:function\w*\(\)|\(\)=>)\{(?:Game\.(?:storeToRefresh|upgradesToRebuild)=1;?)+\}$/.test(source);
+}
+function metadataEffect(g,u){
+  for(const [key,effect] of priceRules)if(g.Upgrades?.[key]===u)return {...effect};
+  if((g.cookieUpgrades??[]).includes(u) && Number.isFinite(u.power) && u.power>=0)return {passiveMultiplier:1+u.power*.01};
+  return null;
+}
+function eggPriceEffects(g,u){
+  if(!(g.eggDrops??[]).some(key=>g.Upgrades?.[key]===u) && !(g.rareEggDrops??[]).some(key=>g.Upgrades?.[key]===u))return [];
+  return [...(g.eggDrops??[]).map(key=>({id:'upgrade:'+g.Upgrades[key].id,multiplier:2})),
+    ...(g.rareEggDrops??[]).map(key=>({id:'upgrade:'+g.Upgrades[key].id,multiplier:3}))];
+}
+// Preserve pre-ceiling prices so two successive discounts do not compound rounding error.
+// Verification against getPrice is mandatory before the result is used.
+function unroundedUpgradePrice(g,u,actual){
+  if(typeof g.Has!=='function' || typeof g.auraMult!=='function' || typeof g.eff!=='function')return null;
+  let price=u.priceFunc?u.priceFunc(u):u.basePrice;
+  if(!Number.isFinite(price) || price<0)return null;
+  if(u.pool!=='prestige'){
+    if(g.Has('Toy workshop'))price*=.95;
+    if(g.Has('Five-finger discount'))price*=.99**((g.ObjectsById[0]?.amount??0)/100);
+    const factors=[["Santa's dominion",.98],['Faberge egg',.99],['Divine sales',.99],['Fortune #100',.99],['Wrinkler ambergris',.99]];
+    for(const [key,mult] of factors)if(g.Has(key))price*=mult;
+    if(u.kitten && g.Has('Kitten wages'))price*=.9;
+    if(g.hasBuff?.("Haggler's luck"))price*=.98;
+    if(g.hasBuff?.("Haggler's misery"))price*=1.02;
+    price*=1-g.auraMult('Master of the Armory')*.02;
+    price*=g.eff('upgradeCost');
+    if(u.pool==='cookie' && g.Has('Divine bakeries'))price/=5;
+  }
+  return Math.ceil(price)===actual?price:null;
+}
+
+Object.assign(exports,{refreshOnly,metadataEffect,eggPriceEffects,unroundedUpgradePrice});
 },
 "src/runtime/coordinator.mjs":function(require,exports){
 const { DEFAULT_CONFIG }=require("src/core/contracts.mjs");
@@ -461,7 +530,7 @@ const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.4';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.5';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -551,7 +620,7 @@ Object.assign(exports,{RUNTIME_KEY,Coordinator});
 },
 "src/core/planner.mjs":function(require,exports){
 const { validateInput, clone, known, unknown, epsilon }=require("src/core/contracts.mjs");
-const { income, allOffers, applyAction, advance, eta, effectDelta }=require("src/core/model.mjs");
+const { income, allOffers, offerById, applyAction, advance, eta, effectDelta }=require("src/core/model.mjs");
 const { unlockRoute }=require("src/core/unlocks.mjs");
 
 const waitAction = (reason, seconds = null, targetId = null) => ({ id: 'wait', kind: 'wait', operation: 'waitUntil', targetId, price: 0, waitSeconds: seconds, reason });
@@ -607,22 +676,29 @@ function plan(input) {
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
     targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
-    unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null };
+    unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null,
+    coverage:{unmodeledAffordable:candidates.filter(o=>o.affordable&&!o.effect&&!o.disabled).map(o=>o.id),
+      unmodeled:candidates.filter(o=>!o.effect&&!o.disabled).map(o=>o.id),disabled:candidates.filter(o=>o.disabled).map(o=>o.id)} };
   function finish(action, reason, next = commitment) { record.selectedAction = action; record.reasonCode = reason; record.nextCommitment = next; return record; }
   if (s.pendingExecution) return finish(waitAction('WAIT_PENDING'), 'WAIT_PENDING');
   if(commitment && target?.eligible && target.effect && eta(s,target.price,c.maxEvents)===0)return finish(buyAction(target),'BUY_TARGET',{...commitment,status:'ready'});
   function pathValues(path){return horizons.map(h=>{
     let at=s;
-    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,allOffers(at).find(x=>x.id===step.action.id));if(!at)throw new Error('invalid-simulation-path');}
+    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,offerById(at,step.action.id));if(!at)throw new Error('invalid-simulation-path');}
     return values(at,s.elapsed,[h],c)[0];
   });}
+  // Earlier horizons keep their parent's continuation value; only the new tail changes.
+  function extendValues(parent,after){
+    const continuation=values(after,s.elapsed,horizons,c);
+    return continuation.map((v,i)=>v===null?parent.value[i]:v);
+  }
   const root = { id: 0, state: s, path: [], value: baseline, score: 0 };
   const singles=[];
   for(const o of offers){
     if(!o.eligible || !o.effect)continue;
     const wait=eta(s,o.price,c.maxEvents);if(!Number.isFinite(wait) || wait>=horizons[2])continue;
-    const ready=advance(s,wait,c.maxEvents),current=allOffers(ready).find(x=>x.id===o.id),after=applyAction(ready,current);if(!after)continue;
-    const path=[{action:buyAction(current),at:after.elapsed-s.elapsed,wait}],value=pathValues(path);
+    const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=applyAction(ready,current);if(!after)continue;
+    const path=[{action:buyAction(current),at:after.elapsed-s.elapsed,wait}],value=extendValues(root,after);
     singles.push({id:-singles.length-1,state:after,path,value,score:score(value),terminalOnly:!!o.rootOnly});
   }
   const singleById=new Map(singles.map(n=>[n.path[0].action.id,n]));
@@ -640,11 +716,11 @@ function plan(input) {
         const wait = eta(node.state,o.price,c.maxEvents);
         if (!Number.isFinite(wait) || node.state.elapsed - s.elapsed + wait >= horizons[2]) continue;
         const ready = advance(node.state,wait,c.maxEvents);
-        const currentOffer = allOffers(ready).find(x => x.id === o.id);
+        const currentOffer = offerById(ready,o.id);
         const after = applyAction(ready,currentOffer);
         if (!after) continue;
         const path = [...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
-        const v = pathValues(path);
+        const v = extendValues(node,after);
         const next = { id: nodeId++, state: after, path, value: v, score: score(v), terminalOnly:!!o.rootOnly };
         nextLevel.push(next); terminals.push(next);
         record.expandedNodes.push({ id:next.id,parentId:node.id,actionId:o.id,at:after.elapsed-s.elapsed,value:v });
@@ -726,7 +802,10 @@ function plan(input) {
   }
   record.plannedSteps = best.path;
   record.objectiveComponents = best.value;
-  if (!best.path.length) return finish(waitAction(candidates.some(x => !x.effect) ? 'WAIT_UNKNOWN_EFFECT' : 'WAIT_EVENT'), candidates.some(x => !x.effect) ? 'WAIT_UNKNOWN_EFFECT' : 'WAIT_EVENT');
+  if (!best.path.length) {
+    const reason=record.coverage.unmodeledAffordable.length?'WAIT_UNKNOWN_EFFECT':'WAIT_NO_PROFITABLE_PLAN';
+    return finish(waitAction(reason),reason);
+  }
   const first = best.path[0];
   if(best.goalId || record.reservationReview?.switched){
     const next={...(record.reservationReview?.switched?commitment:{}),targetId:best.goalId??first.action.id,status:'saving'};
@@ -740,7 +819,7 @@ Object.assign(exports,{plan});
 },
 "src/core/unlocks.mjs":function(require,exports){
 const { clone }=require("src/core/contracts.mjs");
-const { allOffers,applyAction,advance,eta,eligible }=require("src/core/model.mjs");
+const { offerById,applyAction,advance,eta,eligible }=require("src/core/model.mjs");
 
 // Simulate the complete dependency cost without external side effects.
 function unlockRoute(initial,targetId,config,budget={remaining:256}){
@@ -748,14 +827,14 @@ function unlockRoute(initial,targetId,config,budget={remaining:256}){
   const path=[],visiting=new Set();
   function buy(id){
     if(path.length>=config.maxUnlockSteps || budget.remaining<=0)throw new Error('unlock-budget');
-    let offer=allOffers(state).find(o=>o.id===id);
+    let offer=offerById(state,id);
     if(!offer || !offer.eligible || !offer.effect || offer.disabled)throw new Error('unavailable-prerequisite');
     if(limited || (offer.rootOnly && path.length))throw new Error('unsupported-child-model');
     for(let n=0;n<config.maxEvents;n++){
       const delay=eta(state,offer.price,config.maxEvents);
       if(!Number.isFinite(delay))throw new Error('unreachable');
       state=advance(state,delay,config.maxEvents);
-      offer=allOffers(state).find(o=>o.id===id);
+      offer=offerById(state,id);
       const after=applyAction(state,offer);
       if(after){
         budget.remaining--;cost+=offer.price;state=after;limited=!!offer.rootOnly;
@@ -770,7 +849,7 @@ function unlockRoute(initial,targetId,config,budget={remaining:256}){
     if(state.owned.includes(id))return;
     if(visiting.has(id))throw new Error('dependency-cycle');
     if(visiting.size>=config.maxUnlockSteps)throw new Error('unlock-budget');
-    const offer=allOffers(state).find(o=>o.id===id);
+    const offer=offerById(state,id);
     if(!offer || offer.disabled || !offer.effect)throw new Error('unknown-prerequisite');
     visiting.add(id);
     for(const required of offer.requiresOwned??[])acquire(required);
@@ -886,6 +965,7 @@ Object.assign(exports,{hash,bundle,replay,Diagnostics});
 },
 "src/ui/panel.mjs":function(require,exports){
 const { attachPanelLayout }=require("src/ui/panel-layout.mjs");
+const { coverageLines }=require("src/ui/coverage.mjs");
 function mountPanel(runtime,document){
   document.getElementById('cc-rebuild-panel')?.remove();
   const root=document.createElement('section');root.id='cc-rebuild-panel';
@@ -898,6 +978,9 @@ function mountPanel(runtime,document){
   const body=document.createElement('div');root.append(body);
   const hint=document.createElement('small');hint.textContent='上部で移動 · 右下でサイズ変更（位置とサイズは保存）';body.append(hint);
   const status=document.createElement('pre');status.style.cssText='white-space:pre-wrap;font:inherit';status.setAttribute('role','status');body.append(status);
+  const unsupported=document.createElement('details');body.append(unsupported);
+  const unsupportedTitle=document.createElement('summary');unsupported.append(unsupportedTitle);
+  const unsupportedText=document.createElement('pre');unsupportedText.style.cssText='white-space:pre-wrap;font:inherit';unsupported.append(unsupportedText);
   const controls=document.createElement('div');body.append(controls);
   function button(label,handler){const b=document.createElement('button');b.textContent=label;b.style.cssText='margin:3px;padding:4px 7px;cursor:pointer';b.onclick=handler;controls.append(b);return b;}
   const mode=button('自動化を開始',()=>{runtime.setObserveOnly(!runtime.config.observeOnly);runtime.tick();render();});
@@ -915,11 +998,15 @@ function mountPanel(runtime,document){
   details.ontoggle=()=>render();
   function render(){
     const d=runtime.last?.decision;
-    const reasons={WAIT_TARGET:'購入資金を貯めています',BUY_TARGET:'予約対象を購入',BUY_BEST_PLAN:'成長効率を比較して購入',BUY_ADVANCES_TARGET:'目標への到達を早める購入',BUY_UNLOCK_PREREQUISITE:'強化の解禁に必要な施設・前提を購入',WAIT_UNLOCK_PREREQUISITE:'強化の解禁に必要な資金を貯めています',WAIT_EVENT:'次の変化を待っています',WAIT_UNKNOWN_EFFECT:'効果が未対応のため待機',WAIT_TARGET_UNAVAILABLE:'予約対象を再確認中',WAIT_PENDING:'購入結果を確認中'};
+    const reasons={WAIT_TARGET:'購入資金を貯めています',BUY_TARGET:'予約対象を購入',BUY_BEST_PLAN:'成長効率を比較して購入',BUY_ADVANCES_TARGET:'目標への到達を早める購入',BUY_UNLOCK_PREREQUISITE:'強化の解禁に必要な施設・前提を購入',WAIT_UNLOCK_PREREQUISITE:'強化の解禁に必要な資金を貯めています',WAIT_EVENT:'次の変化を待っています',WAIT_NO_PROFITABLE_PLAN:'評価済み候補では購入より待機が有利です',WAIT_UNKNOWN_EFFECT:'評価済み候補では待機が有利です（購入可能な未評価候補あり）',WAIT_TARGET_UNAVAILABLE:'予約対象を再確認中',WAIT_PENDING:'購入結果を確認中'};
     const target=runtime.commitment?.targetId;
     const candidate=d?.allCandidates.find(c=>c.id===(target??d.selectedAction.id));
     const name=candidate?.displayName ?? (candidate?.kind==='building'?'施設 '+candidate.targetId:(target??'なし'));
     const eta=d?.targetEta?.direct;
+    const unsupportedLines=coverageLines(d);unsupported.hidden=unsupportedLines.length===0;
+    unsupportedTitle.textContent=`未評価・購入対象外の強化（${unsupportedLines.length}件）`;
+    unsupportedText.textContent=unsupportedLines.join('\n');
+    if(d?.reasonCode==='WAIT_UNKNOWN_EFFECT')unsupported.open=true;
     status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
     if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,reservationReview:d.reservationReview,comparison:d.comparison,unlockPaths:d.unlockPaths,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}
     mode.textContent=runtime.config.observeOnly?'自動化を開始':'観測モードへ';mode.disabled=runtime.stopped;
@@ -970,5 +1057,19 @@ function attachPanelLayout(root,handle,body,document){
 }
 
 Object.assign(exports,{attachPanelLayout});
+},
+"src/ui/coverage.mjs":function(require,exports){
+function coverageLines(decision){
+  if(!decision)return [];
+  return decision.allCandidates.filter(o=>o.kind==='upgrade' && (o.disabled || !o.effect))
+    .sort((a,b)=>Number(b.affordable)-Number(a.affordable)||Number(a.disabled)-Number(b.disabled))
+    .map(o=>{
+    const name=o.displayName??o.internalName??o.id;
+    const reason=o.disabled?'購入対象外：特殊操作・購入条件が未対応':o.affordable?'購入可能ですが、間接効果をまだ評価できません':o.eligible?'資金待ち・効果未評価':'未解禁・効果未評価';
+    return `${name} — ${reason}`;
+  });
+}
+
+Object.assign(exports,{coverageLines});
 }
 };const cache={};function require(id){if(!cache[id]){cache[id]={};factories[id](require,cache[id]);}return cache[id];}require("src/runtime/browser.mjs");})();

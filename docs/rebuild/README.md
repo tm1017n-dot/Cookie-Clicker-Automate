@@ -4,6 +4,8 @@
 
 実装後の変更は[実装記録](IMPLEMENTATION.md)、購入戦略三点の追加設計は[STRATEGY_ALPHA4](STRATEGY_ALPHA4.md)を参照。予約切替と比較条件はalpha.4追加設計を優先する。
 
+未評価候補・割引モデル・軽量化の変更は[PERFORMANCE_ALPHA5](PERFORMANCE_ALPHA5.md)を参照。
+
 既存要件の確認元: main commit 73a1a59e70e9c4110ce553777b3449ff93b6a945。新規設計の初期パラメータは検証で調整し、変更理由を残す。
 
 ## 目的と読み順

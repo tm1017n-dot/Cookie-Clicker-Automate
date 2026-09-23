@@ -1,6 +1,7 @@
 import { makeInput, clone, freeze, RULESET_VERSION } from '../core/contracts.mjs';
 import { Journal } from './journal.mjs';
 import { effectDelta } from '../core/model.mjs';
+import { refreshOnly,metadataEffect,eggPriceEffects,unroundedUpgradePrice } from './effects.mjs';
 
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
@@ -30,7 +31,7 @@ export class GameAdapter {
     if (g.ascensionMode) throw new Error('unsupported-ascension-mode');
     if (Object.keys(g.mods || {}).length || Object.values(g.modHooks || {}).some(x => Array.isArray(x) && x.length)) throw new Error('unreviewed-mod-hooks');
   }
-  measure(change, touched = null) {
+  measure(change, touched = null, probeMouse = false) {
     if (this.busy || this.fault) throw new Error(this.fault || 'adapter-busy');
     this.audit();
     const g = this.game, journal = new Journal(touched===null?objects(g):gainsObjects(g,touched));
@@ -40,8 +41,10 @@ export class GameAdapter {
       // The gains pass mutates caches; all root primitives and entity descriptors are journaled.
       change(g);
       g.CalculateGains();
-      return { passive: finite(g.cookiesPs,'passive'), mouse: finite(g.mouseCps(),'mouse'),
+      const result={ passive: finite(g.cookiesPs,'passive'), mouse: finite(g.mouseCps(),'mouse'),
         global: finite(g.globalCpsMult ?? 1,'multiplier') };
+      if(probeMouse){const step=Math.max(1,Math.abs(g.cookiesPs));g.cookiesPs+=step;result.fraction=Math.max(0,(finite(g.mouseCps(),'mouse')-result.mouse)/step);}
+      return result;
     } finally {
       try { journal.restore(); } catch (error) { this.fault = 'reload-required:' + error.message; throw error; }
       finally { this.busy = false; }
@@ -80,16 +83,8 @@ export class GameAdapter {
     const buffs = Object.values(g.buffs || {}).map(b => ({ id:b.id ?? b.name, remaining:Math.max(0,b.time/g.fps),
       passive:b.multCpS ?? 1,click:b.multClick ?? 1 }));
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
-    const steady = this.measure(x => { x.buffs = {}; }, []);
-    // Derive CpS-linked mouse contribution from the live formula, without invoking a click.
-    const journal = new Journal(gainsObjects(g,[]));
-    let fraction;
-    try {
-      g.buffs = {}; g.CalculateGains();
-      const base = g.cookiesPs, mouse = g.mouseCps(), step = Math.max(1,Math.abs(base));
-      g.cookiesPs = base + step;
-      fraction = Math.max(0,(g.mouseCps() - mouse) / step);
-    } finally { try { journal.restore(); } catch (e) { this.fault = 'reload-required:' + e.message; throw e; } }
+    const steady = this.measure(x => { x.buffs = {}; }, [], true);
+    const fraction=steady.fraction;
     const buildings = collection(g.ObjectsById).map(b => {
       const price = this.price('building',b.id);
       const unit = Math.max(0,(b.storedCps ?? (b.amount ? b.storedTotalCps/b.amount : 0)) * steady.global);
@@ -115,13 +110,14 @@ export class GameAdapter {
     const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2 || futureIds.has(u.id))).map(u => {
       const price = this.price('upgrade',u.id);
       const tier=normalTier(g,u),future=futureIds.has(u.id) && !offered.has(u.id);
-      const disallowed = ['prestige','debug','toggle'].includes(u.pool) || Boolean(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask);
+      const disallowed = ['prestige','debug','toggle'].includes(u.pool) || !refreshOnly(u.buyFunction) || Boolean(u.toggleInto) || Boolean(u.ask) || (u.priceLumps??0)>0;
       // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
-      const measured = future?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
+      const measured = future||disallowed?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
       const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
       else if(tier){effect={buildingMultipliers:[{id:tier.buildingId,multiplier:tier.multiplier}]};rootOnly=false;confidence='high';}
+      else if(metadataEffect(g,u)){effect=metadataEffect(g,u);rootOnly=false;confidence='high';}
       else if (u.buildingTie && u.tier != null && !u.buildingTie1 && passiveDelta > 0) {
         const b = buildings.find(b => b.id === u.buildingTie.id);
         if (b && b.amount*b.unitCps > 0) {
@@ -131,7 +127,7 @@ export class GameAdapter {
       }
       if (measured && effect && !rootOnly) {
         const prediction=effectDelta({passive:steady.passive-buildings.reduce((n,b)=>n+b.amount*b.unitCps,0),buildings,
-          buffs:[],clickUnit:steady.mouse-fraction*steady.passive,clickFraction:fraction,nonCursorClick:0,clickRate:1}, {effect});
+          buffs:[],offers:[],clickUnit:steady.mouse-fraction*steady.passive,clickFraction:fraction,nonCursorClick:0,clickRate:1}, {effect});
         const agrees=(a,b)=>Math.abs(a-b)<=Math.max(1e-8,Math.abs(b)*1e-6);
         if(!agrees(prediction.click,mouseDelta) || !agrees(prediction.liquid-prediction.click,passiveDelta))rootOnly=true;
       }
@@ -139,12 +135,15 @@ export class GameAdapter {
         effect=null;
         if (passiveDelta !== 0 || mouseDelta !== 0) { effect={flatPassive:passiveDelta,flatClick:mouseDelta-fraction*passiveDelta}; confidence='medium'; }
       }
+      const eggFactors=eggPriceEffects(g,u);
+      if(effect && eggFactors.length)effect={...effect,upgradePriceFactors:eggFactors};
+      const rawPrice=unroundedUpgradePrice(g,u,price);
       const available = offered.has(u.id);
-      return {id:'upgrade:'+u.id,kind:'upgrade',targetId:u.id,price,effect,rootOnly,confidence,
+      return {id:'upgrade:'+u.id,kind:'upgrade',targetId:u.id,price,unroundedPrice:rawPrice??price,unverifiedPrice:rawPrice===null,effect,rootOnly,confidence,
         internalName:u.name,displayName:u.dname ?? u.name,pool:u.pool ?? '',
         disabled:disallowed || (!available && u.id>2 && !future),
         requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : future?[{id:tier.buildingId,amount:tier.amount}]:[],
-        evidence:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains',coverage:u.buyFunction?'bought-only':'production',passiveDelta,mouseDelta}],
+        evidence:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains + audited metadata',coverage:disallowed?'disabled':!rootOnly?'reusable':'current-state-production',passiveDelta,mouseDelta}],
         warnings:disallowed?['special-operation-not-enabled']:(effect?[]:['unknown-effect'])};
     });
     const sum = buildings.reduce((n,b) => n+b.unitCps*b.amount,0);

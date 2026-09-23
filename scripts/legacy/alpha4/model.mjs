@@ -1,11 +1,5 @@
 import { clone, epsilon } from './contracts.mjs';
 
-// Copy only writable simulation data. Effects, prerequisites and evidence are immutable.
-export function copyState(s) {
-  return {...s,buildings:s.buildings.map(b=>({...b})),offers:s.offers?.map(o=>({...o})),
-    owned:s.owned?.slice(),buffs:s.buffs.map(b=>({...b})),events:s.events?.slice()};
-}
-
 export function income(s) {
   const raw = Math.max(0, s.passive + s.buildings.reduce((sum, b) => sum + b.amount * b.unitCps, 0));
   const passiveMult = s.buffs.reduce((m, b) => m * b.passive, 1);
@@ -24,7 +18,6 @@ export function buildingPrice(b) {
 }
 export function eligible(s, o) {
   if (s.owned.includes(o.id) || o.disabled || o.price === null) return false;
-  if (s.pricesChanged && o.unverifiedPrice) return false;
   if (o.requiresOwned?.some(id => !s.owned.includes(id))) return false;
   if (o.requiresBuildings?.some(r => (s.buildings.find(b => b.id === r.id)?.amount ?? 0) < r.amount)) return false;
   if (o.availableAt != null && s.elapsed < o.availableAt) return false;
@@ -34,12 +27,6 @@ export function allOffers(s) {
   return [...s.buildings.filter(b => !b.disabled).map(b => ({ id: 'building:' + b.id, kind: 'building', targetId: b.id,
     price: buildingPrice(b), effect: b.effectOverride ?? { building: b.id }, rootOnly:!!b.rootOnly, confidence: 'high', eligible: true })),
     ...s.offers.map(o => ({ ...o, eligible: eligible(s, o) }))].sort((a,b) => a.id.localeCompare(b.id, 'en'));
-}
-export function offerById(s,id) {
-  const b=s.buildings.find(b=>'building:'+b.id===id);
-  if(b)return b.disabled?undefined:{id,kind:'building',targetId:b.id,price:buildingPrice(b),effect:b.effectOverride??{building:b.id},rootOnly:!!b.rootOnly,confidence:'high',eligible:true};
-  const o=s.offers.find(o=>o.id===id);
-  return o?{...o,eligible:eligible(s,o)}:undefined;
 }
 export function applyEffect(s, e) {
   if (e.building != null) s.buildings.find(b => b.id === e.building).amount++;
@@ -60,24 +47,15 @@ export function applyEffect(s, e) {
     const b = s.buildings.find(x => x.id === m.id);
     if (b) b.unitCps *= m.multiplier;
   }
-  const buildingDiscount=e.buildingPriceMultiplier??e.priceMultiplier;
-  const upgradeDiscount=e.upgradePriceMultiplier??e.priceMultiplier;
-  if (buildingDiscount != null) {
-    for (const b of s.buildings) { b.unroundedNextPrice=(b.unroundedNextPrice??b.nextPrice)*buildingDiscount; b.nextPrice=Math.ceil(b.unroundedNextPrice); }
-  }
-  if (upgradeDiscount != null) {
-    for (const o of s.offers) if (o.price !== null) { o.unroundedPrice=(o.unroundedPrice??o.price)*upgradeDiscount; o.price=Math.ceil(o.unroundedPrice); }
-    s.pricesChanged=true;
-  }
-  for(const m of e.upgradePriceFactors??[]){
-    const o=s.offers?.find(o=>o.id===m.id);
-    if(o && o.price!==null){o.unroundedPrice=(o.unroundedPrice??o.price)*m.multiplier;o.price=Math.ceil(o.unroundedPrice);}
+  if (e.priceMultiplier != null) {
+    for (const b of s.buildings) { b.nextPrice = Math.ceil(b.nextPrice * e.priceMultiplier); b.unroundedNextPrice = (b.unroundedNextPrice ?? b.nextPrice / e.priceMultiplier) * e.priceMultiplier; }
+    for (const o of s.offers) if (o.price !== null) o.price *= e.priceMultiplier;
   }
   if (e.reward) { s.bank += e.reward; s.earned += e.reward; }
   if (e.buff) s.buffs.push(clone(e.buff));
 }
 export function applyAction(state, offer) {
-  const s = copyState(state);
+  const s = clone(state);
   if (!offer?.effect || !offer.eligible || s.bank + epsilon(s.bank, offer.price) < offer.price + s.reserve) return null;
   s.bank = Math.max(0, s.bank - offer.price);
   applyEffect(s, offer.effect);
@@ -86,7 +64,7 @@ export function applyAction(state, offer) {
 }
 export function advance(state, seconds, maxEvents = 4096) {
   if (!Number.isFinite(seconds) || seconds < 0) throw new TypeError('invalid duration');
-  const s = copyState(state);
+  const s = clone(state);
   for (const e of s.events.filter(e => e.at <= s.elapsed)) applyEffect(s, e.effect ?? {});
   s.events = s.events.filter(e => e.at > s.elapsed);
   s.buffs = s.buffs.filter(b => b.remaining > 0);
@@ -126,7 +104,7 @@ export function eta(state, price, maxEvents = 4096) {
 }
 export function effectDelta(s, offer) {
   if (!offer.effect) return null;
-  const before = income(s), after = copyState(s);
+  const before = income(s), after = clone(s);
   applyEffect(after, offer.effect);
   const out = income(after);
   return { liquid: out.liquid - before.liquid, click: out.click - before.click, economic: out.economic - before.economic };

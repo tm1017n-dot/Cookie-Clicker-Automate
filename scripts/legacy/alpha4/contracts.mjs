@@ -1,5 +1,5 @@
-export const ENGINE_VERSION = '9.0.0-alpha.5';
-export const RULESET_VERSION = 'cc-web-2.058/basic-3';
+export const ENGINE_VERSION = '9.0.0-alpha.4';
+export const RULESET_VERSION = 'cc-web-2.058/basic-2';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,

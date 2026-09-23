@@ -1,5 +1,5 @@
 import { clone } from './contracts.mjs';
-import { offerById,applyAction,advance,eta,eligible } from './model.mjs';
+import { allOffers,applyAction,advance,eta,eligible } from './model.mjs';
 
 // Simulate the complete dependency cost without external side effects.
 export function unlockRoute(initial,targetId,config,budget={remaining:256}){
@@ -7,14 +7,14 @@ export function unlockRoute(initial,targetId,config,budget={remaining:256}){
   const path=[],visiting=new Set();
   function buy(id){
     if(path.length>=config.maxUnlockSteps || budget.remaining<=0)throw new Error('unlock-budget');
-    let offer=offerById(state,id);
+    let offer=allOffers(state).find(o=>o.id===id);
     if(!offer || !offer.eligible || !offer.effect || offer.disabled)throw new Error('unavailable-prerequisite');
     if(limited || (offer.rootOnly && path.length))throw new Error('unsupported-child-model');
     for(let n=0;n<config.maxEvents;n++){
       const delay=eta(state,offer.price,config.maxEvents);
       if(!Number.isFinite(delay))throw new Error('unreachable');
       state=advance(state,delay,config.maxEvents);
-      offer=offerById(state,id);
+      offer=allOffers(state).find(o=>o.id===id);
       const after=applyAction(state,offer);
       if(after){
         budget.remaining--;cost+=offer.price;state=after;limited=!!offer.rootOnly;
@@ -29,7 +29,7 @@ export function unlockRoute(initial,targetId,config,budget={remaining:256}){
     if(state.owned.includes(id))return;
     if(visiting.has(id))throw new Error('dependency-cycle');
     if(visiting.size>=config.maxUnlockSteps)throw new Error('unlock-budget');
-    const offer=offerById(state,id);
+    const offer=allOffers(state).find(o=>o.id===id);
     if(!offer || offer.disabled || !offer.effect)throw new Error('unknown-prerequisite');
     visiting.add(id);
     for(const required of offer.requiresOwned??[])acquire(required);

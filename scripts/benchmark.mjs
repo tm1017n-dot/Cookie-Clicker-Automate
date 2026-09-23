@@ -2,6 +2,7 @@
 import { readdirSync,readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { plan } from '../src/core/planner.mjs';
+import { plan as alpha4Plan } from './legacy/alpha4/planner.mjs';
 import { DEFAULT_CONFIG,ENGINE_VERSION,RULESET_VERSION,makeInput } from '../src/core/contracts.mjs';
 const dir=new URL('../tests/fixtures/captured/',import.meta.url);
 for(const name of readdirSync(dir).filter(x=>x.endsWith('.json'))){
@@ -14,5 +15,9 @@ for(const name of readdirSync(dir).filter(x=>x.endsWith('.json'))){
 }
 const sample=JSON.parse(readFileSync(new URL('building-2.json',dir),'utf8')).input.state;
 const stress=makeInput({...sample,commitment:null,offers:[...sample.offers,...sample.buildings.filter(b=>b.id>0).map(b=>({id:'upgrade:synthetic-'+b.id,kind:'upgrade',targetId:10000+b.id,price:b.nextPrice*10,requiresBuildings:[{id:b.id,amount:b.amount+4}],effect:{buildingMultipliers:[{id:b.id,multiplier:2}]}}))]});
-const start=performance.now(),decision=plan(stress);
-console.log(JSON.stringify({fixture:'synthetic-next-tiers',elapsedMs:+(performance.now()-start).toFixed(2),candidates:decision.allCandidates.length,nodes:decision.expandedNodes.length,routes:decision.unlockPaths.length}));
+for(const [engine,planner,input] of [['alpha4',alpha4Plan,{...stress,engineVersion:'9.0.0-alpha.4',rulesetVersion:'cc-web-2.058/basic-2'}],['current',plan,stress]]){
+ const samples=[];let decision;
+ for(let n=0;n<10;n++){const start=performance.now();decision=planner(input);samples.push(performance.now()-start);}
+ samples.sort((a,b)=>a-b);
+ console.log(JSON.stringify({fixture:'synthetic-next-tiers',engine,medianMs:+samples[5].toFixed(2),maxMs:+samples[9].toFixed(2),candidates:decision.allCandidates.length,nodes:decision.expandedNodes.length,routes:decision.unlockPaths.length,selectedAction:decision.selectedAction.id}));
+}

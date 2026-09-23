@@ -29,7 +29,7 @@ test('real TieredUpgrade buildingTie1 metadata remains a reusable model',()=>{
 });
 test('locked future tiers add no CalculateGains pass',()=>{
  const g=tierGame(),calculate=g.CalculateGains;let count=0;g.CalculateGains=()=>{count++;calculate();};
- new GameAdapter(()=>g).capture(DEFAULT_CONFIG);assert.equal(count,7);
+ new GameAdapter(()=>g).capture(DEFAULT_CONFIG);assert.equal(count,6);
 });
 test('unshackled ordinary tiers use the audited extra multiplier',()=>{
  const g=tierGame();g.ObjectsById[1].unshackleUpgrade='building-unshackle';g.Tiers[1].unshackleUpgrade='tier-unshackle';g.Has=()=>true;
