@@ -23,6 +23,21 @@ test('click scheduling respects rate changes and never catches up in bursts',asy
  r.setClickRate(20);for(now=1000;now<2000;now+=10)r.clickTick();assert.equal(g.cookieClicks,120);assert.equal(r.clickRate(),20);
  now=60000;r.clickTick();r.clickTick();assert.equal(g.cookieClicks,121);assert.throws(()=>r.setClickRate(101));r.shutdown();
 });
+test('short timer throttling is recovered with a bounded click batch',async()=>{
+ const g=mockGame();let now=0;const r=new Coordinator({},new GameAdapter(()=>g),{config:{observeOnly:false},clock:()=>now});await r.start({timers:false});
+ for(now=0;now<5000;now+=25)r.clickTick();
+ now=5000;const measured=r.measuredClickRate();
+ assert.ok(measured>=99 && measured<=100,`measured ${measured}`);
+ const before=g.cookieClicks;now=5075;r.clickTick();assert.equal(g.cookieClicks-before,5);
+ r.shutdown();
+});
+test('failed clicks stop the current recovery batch and are never counted',async()=>{
+ let now=0,calls=0,accepted=0;const adapter={fault:null,click(){calls++;if(calls===3)return false;accepted++;return true;},collect(){return 0;}};
+ const r=new Coordinator({},adapter,{config:{observeOnly:false},clock:()=>now});await r.start({timers:false});
+ r.clickTick();now=50;r.clickTick();
+ assert.equal(calls,3);assert.equal(accepted,2);assert.equal(r.clicks.length,2);
+ r.shutdown();
+});
 test('startup income uses only successful clicks, never the configured target',async()=>{
  const g=mockGame();let now=0;const r=new Coordinator({},new GameAdapter(()=>g),{clock:()=>now});await r.start({timers:false});
  assert.equal(r.clickRate(),0);r.setObserveOnly(false);assert.equal(r.measuredClickRate(),0);assert.equal(r.clickRate(),0);

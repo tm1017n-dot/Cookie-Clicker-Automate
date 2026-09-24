@@ -4,12 +4,15 @@ import { Executor } from './executor.mjs';
 import { bundle, Diagnostics } from './diagnostics.mjs';
 
 export const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
+const CLICK_RECOVERY_WINDOW_MS=100;
+const MAX_CLICK_BATCH=5;
 export class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.8';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.9';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
+    this.lastClickTick=null;this.clickCredit=0;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
     this.snapshot=()=>this.diagnostics.latest();
   }
@@ -31,10 +34,23 @@ export class Coordinator {
   clickRate(){return this.measuredClickRate();}
   clickTick(){
     if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;
-    const now=this.clock();if(now<(this.nextClickAt??0))return;
-    // No catch-up burst after a stalled/background tab.
-    this.nextClickAt=now+1000/this.config.clickRate;
-    try{if(this.adapter.click(this.config.clickRate))this.clicks.push(now);}catch(e){this.error=e.message;this.onUpdate(this);}
+    const now=this.clock(),interval=1000/this.config.clickRate;
+    if(this.lastClickTick===null)this.clickCredit=1;
+    else{
+      const elapsed=Math.max(0,now-this.lastClickTick);
+      // Recover ordinary timer throttling, but discard long background-tab stalls.
+      this.clickCredit=elapsed>CLICK_RECOVERY_WINDOW_MS?1:Math.min(MAX_CLICK_BATCH,this.clickCredit+elapsed/interval);
+    }
+    this.lastClickTick=now;
+    const due=Math.min(MAX_CLICK_BATCH,Math.floor(this.clickCredit+1e-9));
+    if(due<1)return;
+    this.clickCredit-=due;
+    try{
+      for(let n=0;n<due;n++){
+        if(!this.adapter.click(this.config.clickRate)){this.clickCredit=0;break;}
+        this.clicks.push(now);
+      }
+    }catch(e){this.clickCredit=0;this.error=e.message;this.onUpdate(this);}
   }
   collectTick(){if(!this.owns() || this.config.observeOnly || this.error)return;try{this.adapter.collect(this.config);}catch(e){this.error=e.message;this.onUpdate(this);}}
   async tick(){
@@ -89,6 +105,6 @@ export class Coordinator {
     if(!Number.isInteger(value) || value<1 || value>100)throw new TypeError('クリック速度は1〜100の整数で指定してください');
     this.config.clickRate=value;this.clearCommitment();this.resume();
   }
-  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.nextClickAt=0;this.onUpdate(this);}
+  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.lastClickTick=null;this.clickCredit=0;this.onUpdate(this);}
   shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { makeInput,clone,canonical } from '../src/core/contracts.mjs';
 import { plan } from '../src/core/planner.mjs';
 import { plan as alpha7Plan } from '../scripts/legacy/alpha7/planner.mjs';
+import { plan as alpha8Plan } from '../scripts/legacy/alpha8/planner.mjs';
 import { hash } from '../src/runtime/diagnostics.mjs';
 import { replay } from '../scripts/replay-engine.mjs';
 import { makeGolden } from '../src/core/golden.mjs';
@@ -32,4 +33,10 @@ test('alpha7 diagnostics continue to replay with the archived planner',async()=>
  assert.equal((await replay(snapshot)).matches,true);
  const corrupt=JSON.parse(JSON.stringify(snapshot));corrupt.input.state.bank++;
  await assert.rejects(()=>replay(corrupt),/InputChecksumMismatch/);
+});
+
+test('alpha8 diagnostics continue to replay after the runtime scheduler change',async()=>{
+ const input={...clone(scenario(8)),engineVersion:'9.0.0-alpha.8'};
+ const snapshot={schemaVersion:1,input,inputHash:await hash(input),decision:alpha8Plan(input)};
+ assert.equal((await replay(snapshot)).matches,true);
 });
