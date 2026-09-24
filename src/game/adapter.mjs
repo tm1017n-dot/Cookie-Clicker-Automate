@@ -24,7 +24,7 @@ function normalTier(g,u){
 
 export class GameAdapter {
   constructor(getGame, { supportedVersions = ['2.058'] } = {}) {
-    this.getGame = getGame; this.supportedVersions = supportedVersions; this.busy = false; this.fault = null;
+    this.getGame = getGame; this.supportedVersions = supportedVersions; this.busy = false; this.fault = null;this.measurementCache=null;
   }
   get game() { const g = this.getGame(); if (!g?.ready) throw new Error('game-not-ready'); return g; }
   playable() { const g = this.getGame(); return Boolean(g?.ready && !g.OnAscend && !g.AscendTimer && !this.fault); }
@@ -70,12 +70,14 @@ export class GameAdapter {
   runIdentity() { const g=this.game; return JSON.stringify([g.startDate??null,g.fullDate??null,g.resets??0]); }
   signature() {
     const g = this.game;
-    return JSON.stringify({ run:this.runIdentity(),buildings:collection(g.ObjectsById).map(b => [b.id,b.amount,b.level]),
+    return JSON.stringify({ run:this.runIdentity(),buildings:collection(g.ObjectsById).map(b => [b.id,b.amount,b.level,!!b.locked]),
       upgrades:collection(g.UpgradesById).filter(u => u.bought).map(u => u.id),
       buffs:Object.values(g.buffs || {}).map(b => [b.name,b.multCpS ?? 1,b.multClick ?? 1]),
       season:g.season ?? '', dragon:[g.dragonAura ?? 0,g.dragonAura2 ?? 0],
       reserves:[g.lumps ?? 0,g.elderWrath ?? 0],achievements:g.AchievementsOwned??0,research:g.nextResearch??0,
-      minigames:collection(g.ObjectsById).filter(b => b.minigameLoaded).map(b => [b.id,b.minigame?.magic ?? null,b.minigame?.swaps ?? null]),
+      production:[g.unbuffedCps??null,g.globalCpsMult??null,g.mouseCps?.()??null,g.heralds??null],
+      effects:Object.entries(g.effs??{}).filter(([,v])=>Number.isFinite(v)),
+      minigames:collection(g.ObjectsById).filter(b => b.minigameLoaded).map(b => [b.id,b.minigame?.magic ?? null,b.minigame?.swaps ?? null,b.minigame?.slot?.map?.(x=>x?.id??x??null)??null]),
       ascend:!!(g.OnAscend || g.AscendTimer) });
   }
   capture(config, commitment = null, measuredRate = config.clickRate) {
@@ -83,15 +85,26 @@ export class GameAdapter {
     const g = this.game;
     if (!this.playable()) throw new Error('game-not-playable');
     const signature = this.signature();
+    const measurementSignature=signature+'|'+JSON.stringify((g.UpgradesInStore??[]).map(u=>u.id));
     const buffs = Object.values(g.buffs || {}).map(b => ({ id:b.id ?? b.name, remaining:Math.max(0,b.time/g.fps),
       passive:b.multCpS ?? 1,click:b.multClick ?? 1 }));
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
-    const steady = this.measure(x => { x.buffs = {}; }, [], true);
+    const cacheHit=this.measurementCache?.signature===measurementSignature;
+    const measurements=cacheHit?this.measurementCache:{signature:measurementSignature,steady:null,buildings:new Map(),upgrades:new Map()};
+    let measurementPasses=0;
+    const runMeasure=(change,touched,probe=false)=>{measurementPasses++;return this.measure(change,touched,probe);};
+    const steady = measurements.steady??runMeasure(x => { x.buffs = {}; }, [], true);
+    measurements.steady=steady;
     const fraction=steady.fraction;
+    const firstNonCursor=collection(g.ObjectsById).find(b=>b.id>0)?.id;
+    const probeLockedNonCursor=!!g.Has?.('Thousand fingers');
     const buildings = collection(g.ObjectsById).map(b => {
       const price = this.price('building',b.id);
       const unit = Math.max(0,(b.storedCps ?? (b.amount ? b.storedTotalCps/b.amount : 0)) * steady.global);
-      const measured = this.measure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; }, []);
+      const needsMeasure=!b.locked || (probeLockedNonCursor && b.id===firstNonCursor);
+      let measured=measurements.buildings.get(b.id);
+      if(!measured && needsMeasure){measured=runMeasure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; }, []);measurements.buildings.set(b.id,measured);}
+      measured??={passive:steady.passive+unit,mouse:steady.mouse+fraction*unit};
       const passiveDelta = measured.passive - steady.passive;
       const clickDelta = measured.mouse - steady.mouse;
       const residual = clickDelta - fraction*passiveDelta;
@@ -129,7 +142,8 @@ export class GameAdapter {
       const gcEffect=goldenUpgradeEffect(g,u,golden.model);
       const disallowed = ['prestige','debug','toggle'].includes(u.pool) || (!refreshOnly(u.buyFunction) && !extra?.callbackAllowed) || Boolean(u.toggleInto) || Boolean(u.ask) || (u.priceLumps??0)>0;
       // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
-      const measured = future||disallowed?null:this.measure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);
+      let measured=future||disallowed?null:measurements.upgrades.get(u.id);
+      if(!measured && !future && !disallowed){measured=runMeasure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);measurements.upgrades.set(u.id,measured);}
       const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
@@ -180,8 +194,9 @@ export class GameAdapter {
     input.observation={ signature, bank:g.cookies,displayedCps:g.cookiesPs,unbuffedCps:g.unbuffedCps,
       clickUnit:g.mouseCps(),requestedClickRate:config.clickRate,measuredClickRate:measuredRate,
       achievements:collection(g.AchievementsById).filter(a => a.won).map(a => a.id), milk:g.milkProgress ?? 0,
-      ruleset:RULESET_VERSION };
+      measurementCache:cacheHit?'hit':'miss',measurementPasses,ruleset:RULESET_VERSION };
     if (signature !== this.signature()) throw new Error('capture-state-changed');
+    this.measurementCache=measurements;
     return freeze(input);
   }
   execute(action) {

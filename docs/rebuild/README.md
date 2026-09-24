@@ -1,5 +1,7 @@
 # 再構築・詳細設計パッケージ
 
+周期的な状態取得停止と測定キャッシュは[CAPTURE_CACHE_ALPHA11](CAPTURE_CACHE_ALPHA11.md)を参照。
+
 100回/秒クリック境界と要求・成功の診断は[CLICK_GATE_ALPHA10](CLICK_GATE_ALPHA10.md)を参照。
 
 クリックタイマー遅延への上限付き補償は[CLICK_SCHEDULER_ALPHA9](CLICK_SCHEDULER_ALPHA9.md)を参照。

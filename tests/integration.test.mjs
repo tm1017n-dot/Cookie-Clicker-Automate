@@ -52,6 +52,20 @@ test('real Game ID dictionaries are supported as well as arrays',()=>{const g=mo
 test('nonlinear click bonuses invalidate a reusable upgrade rule',()=>{const g=mockGame();g.mouseCps=()=>100+2**g.UpgradesById.filter(u=>u.bought).length;const offer=new GameAdapter(()=>g).capture(DEFAULT_CONFIG).state.offers[0];assert.equal(offer.rootOnly,true);assert.equal(offer.effect.flatClick,1);});
 test('SAFE-02 restoration failure permanently disables adapter writes',()=>{const g=mockGame(),a=new GameAdapter(()=>g);g.CalculateGains=()=>Object.defineProperty(g,'unexpected',{value:1,configurable:false});assert.throws(()=>a.measure(()=>{}));assert.match(a.fault,/reload-required/);assert.equal(a.click(),false);});
 test('Adapter captures exact input while preserving Game descriptors',()=>{const g=mockGame(),a=new GameAdapter(()=>g),before=canonical({cookies:g.cookies,owned:g.UpgradesOwned,buildings:g.ObjectsById.map(b=>[b.amount,b.bought,b.storedCps]),upgrades:g.UpgradesById.map(u=>u.bought)}),win=g.Win,effs=g.effs;a.capture(DEFAULT_CONFIG);assert.equal(canonical({cookies:g.cookies,owned:g.UpgradesOwned,buildings:g.ObjectsById.map(b=>[b.amount,b.bought,b.storedCps]),upgrades:g.UpgradesById.map(u=>u.bought)}),before);assert.equal(g.Win,win);assert.equal(g.effs,effs);});
+test('unchanged captures reuse marginal measurements while refreshing volatile values',()=>{
+ const g=mockGame(),original=g.CalculateGains;let calls=0;g.CalculateGains=()=>{calls++;original();};const a=new GameAdapter(()=>g);
+ const first=a.capture(DEFAULT_CONFIG);assert.ok(calls>0);calls=0;
+ g.cookies=123;g.cookiesEarned=456;const second=a.capture(DEFAULT_CONFIG);
+ assert.equal(calls,0);assert.equal(second.state.bank,123);assert.equal(second.state.earned,456);
+ g.ObjectsById[0].amount++;g.ObjectsById[0].bought++;original();calls=0;a.capture(DEFAULT_CONFIG);assert.ok(calls>0);
+ assert.equal(first.observation.measurementCache,'miss');assert.equal(second.observation.measurementCache,'hit');
+});
+test('locked buildings do not run hypothetical production passes',()=>{
+ const g=mockGame(),original=g.CalculateGains;g.ObjectsById.push({id:1,name:'Grandma',amount:0,bought:0,level:0,locked:1,storedCps:1,storedTotalCps:0,basePrice:100,synergies:[],tieredAchievs:{},getPrice(){return 100;}});
+ let calls=0;g.CalculateGains=()=>{calls++;original();};new GameAdapter(()=>g).capture(DEFAULT_CONFIG);
+ // Baseline + Cursor + three offered upgrades; the locked Grandma adds no pass.
+ assert.equal(calls,5);
+});
 test('SAFE-01 restores after calculate exception',()=>{const g=mockGame(),a=new GameAdapter(()=>g),win=g.Win;g.CalculateGains=()=>{g.cookies=999;g.ObjectsById[0].amount=77;throw new Error('injected');};assert.throws(()=>a.measure(x=>{x.UpgradesById[0].bought=1;}));assert.equal(g.cookies,0);assert.equal(g.ObjectsById[0].amount,1);assert.equal(g.UpgradesById[0].bought,0);assert.equal(g.Win,win);});
 for(const failure of ['false','throw'])test('RES-0'+(failure==='false'?2:3)+' no fallback after '+failure,()=>{const {g,a,input,d}=setup();let facilityCalls=0;g.ObjectsById[0].buy=()=>{facilityCalls++;};g.UpgradesById[0].buy=()=>{if(failure==='throw')throw new Error('buy-failed');return false;};const e=new Executor(a,()=>true),r=e.execute(d,input,'1');assert.equal(r.attemptCount,1);assert.equal(facilityCalls,0);assert.equal(d.nextCommitment.targetId,'upgrade:0');assert.equal(e.execute(d,input,'1').status,'duplicate-cycle');});
 test('RES-01 exactly one affordable reserved purchase, success confirmed by bought',()=>{const {g,a,input,d}=setup(),e=new Executor(a,()=>true),r=e.execute(d,input,'1');assert.equal(r.status,'confirmed');assert.equal(g.UpgradesById[0].bought,1);assert.equal(g.ObjectsById[0].amount,1);});

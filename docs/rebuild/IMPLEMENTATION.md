@@ -1,5 +1,9 @@
 # 再構築版 9.0.0-alpha.1 実装記録
 
+## 9.0.0-alpha.11 状態取得停止の軽減
+
+状態不変時に繰り返していた施設・Upgradeの仮想購入とCalculateGainsをキャッシュし、ロック中施設の不要な測定を省いた。変動値は毎周期更新し、状態変化時は再測定する。UIに状態取得時間、診断にhit/missと測定回数を追加。詳細は[CAPTURE_CACHE_ALPHA11](CAPTURE_CACHE_ALPHA11.md)。
+
 ## 9.0.0-alpha.10 クリック境界の安定化
 
 Game 2.058の20ms制限ちょうどに合わせていた時刻調整へ5msの余裕を追加し、同一補完バッチの後続クリックが境界で拒否される経路を修正。UIには要求回数も表示する。詳細は[CLICK_GATE_ALPHA10](CLICK_GATE_ALPHA10.md)。
