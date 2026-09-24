@@ -5,6 +5,7 @@ import { DEFAULT_CONFIG,canonical } from '../src/core/contracts.mjs';
 import { GameAdapter } from '../src/game/adapter.mjs';
 import { Executor } from '../src/runtime/executor.mjs';
 import { Coordinator,RUNTIME_KEY } from '../src/runtime/coordinator.mjs';
+import { createPlanner } from '../src/runtime/planner-client.mjs';
 import { Diagnostics } from '../src/runtime/diagnostics.mjs';
 import { plan } from '../src/core/planner.mjs';
 function setup(){const g=mockGame();g.cookies=100;const a=new GameAdapter(()=>g),input=a.capture(DEFAULT_CONFIG,{targetId:'upgrade:0',status:'ready'}),d=plan(input);return {g,a,input,d};}
@@ -35,6 +36,17 @@ test('short timer throttling is recovered with a bounded click batch',async()=>{
  assert.ok(measured>=99 && measured<=100,`measured ${measured}`);
  const before=g.cookieClicks;now=5075;r.clickTick();assert.equal(g.cookieClicks-before,5);
  r.shutdown();
+});
+test('active planning stalls retain bounded click credit while hidden time is discarded',async()=>{
+ const g=mockGame();let now=0;const page={document:{visibilityState:'visible'}},r=new Coordinator(page,new GameAdapter(()=>g),{config:{observeOnly:false},clock:()=>now});await r.start({timers:false});
+ r.clickTick();now=1000;r.clickTick();for(now=1010;now<=1250;now+=10)r.clickTick();assert.ok(g.cookieClicks>=120);
+ const hidden=mockGame();now=0;const background=new Coordinator({document:{visibilityState:'hidden'}},new GameAdapter(()=>hidden),{config:{observeOnly:false},clock:()=>now});await background.start({timers:false});
+ background.clickTick();now=1000;background.clickTick();assert.equal(hidden.cookieClicks,2);r.shutdown();background.shutdown();
+});
+test('planner client returns worker decisions and terminates cleanly',async()=>{
+ class Worker {postMessage({id}){queueMicrotask(()=>this.onmessage({data:{id,decision:{selectedAction:{id:'worker'}}}}));}terminate(){this.terminated=true;}}
+ const page={Worker,Blob:class{},URL:{createObjectURL:()=> 'blob:test',revokeObjectURL(){}}},planner=createPlanner(page,'worker source');
+ assert.equal(planner.mode,'worker');assert.equal((await planner({})).selectedAction.id,'worker');planner.close();
 });
 test('failed clicks stop the current recovery batch and are never counted',async()=>{
  let now=0,calls=0,accepted=0;const adapter={fault:null,click(){calls++;if(calls===3)return false;accepted++;return true;},collect(){return 0;}};

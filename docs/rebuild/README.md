@@ -1,6 +1,8 @@
 # 再構築・詳細設計パッケージ
 
-周期的な状態取得停止と測定キャッシュは[CAPTURE_CACHE_ALPHA11](CAPTURE_CACHE_ALPHA11.md)を参照。
+周期的な戦略計算停止とWorker分離は[PLANNER_WORKER_ALPHA12](PLANNER_WORKER_ALPHA12.md)を参照。
+
+状態取得停止と測定キャッシュは[CAPTURE_CACHE_ALPHA11](CAPTURE_CACHE_ALPHA11.md)を参照。
 
 100回/秒クリック境界と要求・成功の診断は[CLICK_GATE_ALPHA10](CLICK_GATE_ALPHA10.md)を参照。
 

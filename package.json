@@ -1,6 +1,6 @@
 {
   "name": "cookie-clicker-automate",
-  "version": "9.0.0-alpha.11",
+  "version": "9.0.0-alpha.12",
   "private": true,
   "type": "module",
   "engines": { "node": ">=24" },

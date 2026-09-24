@@ -2,10 +2,12 @@ import { GameAdapter } from '../game/adapter.mjs';
 import { Coordinator } from './coordinator.mjs';
 import { Diagnostics } from './diagnostics.mjs';
 import { mountPanel } from '../ui/panel.mjs';
+import { createPlanner } from './planner-client.mjs';
 
 export async function boot(page,document){
   const adapter=new GameAdapter(()=>page.Game);
-  const runtime=new Coordinator(page,adapter,{diagnostics:new Diagnostics({persist:true})});
+  const source=globalThis.__CC_AUTO_PLANNER_WORKER_SOURCE__??'';
+  const runtime=new Coordinator(page,adapter,{diagnostics:new Diagnostics({persist:true}),planner:createPlanner(page,source)});
   mountPanel(runtime,document);
   try { await runtime.start(); await runtime.tick(); }
   catch(error) { runtime.error=String(error.message); runtime.onUpdate(runtime); }

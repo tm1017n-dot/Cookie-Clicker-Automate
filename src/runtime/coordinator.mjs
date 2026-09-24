@@ -4,12 +4,12 @@ import { Executor } from './executor.mjs';
 import { bundle, Diagnostics } from './diagnostics.mjs';
 
 export const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
-const CLICK_RECOVERY_WINDOW_MS=100;
+const CLICK_RECOVERY_WINDOW_MS=2000;
 const MAX_CLICK_BATCH=5;
 export class Coordinator {
-  constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
+  constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{},planner=plan}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.11';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.planner=planner;this.version='9.0.0-alpha.12';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.clickAttempts=[];this.started=clock();this.error=null;this.last=null;
     this.lastClickTick=null;this.clickCredit=0;
@@ -39,8 +39,9 @@ export class Coordinator {
     if(this.lastClickTick===null)this.clickCredit=1;
     else{
       const elapsed=Math.max(0,now-this.lastClickTick);
-      // Recover ordinary timer throttling, but discard long background-tab stalls.
-      this.clickCredit=elapsed>CLICK_RECOVERY_WINDOW_MS?1:Math.min(MAX_CLICK_BATCH,this.clickCredit+elapsed/interval);
+      // Recover active-tab work such as planning without replaying background-tab time.
+      const hidden=this.page.document?.visibilityState==='hidden';
+      this.clickCredit=hidden || elapsed>CLICK_RECOVERY_WINDOW_MS?1:Math.min(this.config.clickRate*CLICK_RECOVERY_WINDOW_MS/1000,this.clickCredit+elapsed/interval);
     }
     this.lastClickTick=now;
     const due=Math.min(MAX_CLICK_BATCH,Math.floor(this.clickCredit+1e-9));
@@ -78,11 +79,12 @@ export class Coordinator {
       }
       const input=this.adapter.capture(this.config,observeOnly?null:this.commitment,this.config.autoClick?this.clickRate():0);
       const captured=elapsed();
-      const decision=plan(input);
+      const decision=await this.planner(input);
       const planned=elapsed();
+      if(!this.owns() || generation!==this.generation)return;
       const record=await bundle(input,decision,this.token+':'+(++this.cycle));
       record.runtimeVersion=this.version;
-      record.timings={captureMs:captured-started,plannerMs:planned-captured};
+      record.timings={captureMs:captured-started,plannerMs:planned-captured,plannerMode:this.planner.mode??'main-thread'};
       await this.diagnostics.save(record);
       if(!this.owns() || generation!==this.generation)return;
       if(!observeOnly){
@@ -108,5 +110,5 @@ export class Coordinator {
     this.config.clickRate=value;this.clearCommitment();this.resume();
   }
   resume(){this.error=null;this.started=this.clock();this.clicks=[];this.clickAttempts=[];this.lastClickTick=null;this.clickCredit=0;this.onUpdate(this);}
-  shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
+  shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.planner.close?.();this.diagnostics.close();this.onUpdate(this);}
 }
