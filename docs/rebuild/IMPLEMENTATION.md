@@ -1,5 +1,9 @@
 # 再構築版 9.0.0-alpha.1 実装記録
 
+## 9.0.0-alpha.13 分割測定と長期目標
+
+状態取得の`CalculateGains`を1周期最大4回へ制限し、未測定Upgradeを後続周期へ送る。短期3手の詳細探索とは別に、次の施設Tier 2段階、Kitten 3段階、Synergy、Researchを最大512行動の目標経路として比較する。詳細は[BOUNDED_CAPTURE_LONG_GOALS_ALPHA13](BOUNDED_CAPTURE_LONG_GOALS_ALPHA13.md)。
+
 ## 9.0.0-alpha.12 戦略計算の分離
 
 1.5秒周期で同期実行していた戦略探索をWeb Workerへ移し、探索中もクリック、ゲーム描画、UI更新を継続できるようにした。可視タブの一時停止は最大2秒分まで少量ずつ補完し、非表示時間は補完しない。UIには状態取得時間と戦略計算時間を分けて表示する。詳細は[PLANNER_WORKER_ALPHA12](PLANNER_WORKER_ALPHA12.md)。

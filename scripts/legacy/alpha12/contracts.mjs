@@ -1,9 +1,9 @@
-export const ENGINE_VERSION = '9.0.0-alpha.13';
+export const ENGINE_VERSION = '9.0.0-alpha.12';
 export const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
-  maxUnlockSteps:512,maxUnlockNodes:1024,
+  maxUnlockSteps:24,maxUnlockNodes:256,
   switchMargin:.25,switchAbsolute:.05,switchConfirmations:3,switchCooldown:4,
   clickRate: 100, purchaseIntervalMs: 1500, riskWeight: 0.1,
   goldenSamples:8,goldenSeed:713,

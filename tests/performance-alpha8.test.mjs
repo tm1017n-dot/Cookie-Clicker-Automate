@@ -7,6 +7,7 @@ import { plan as alpha8Plan } from '../scripts/legacy/alpha8/planner.mjs';
 import { plan as alpha9Plan } from '../scripts/legacy/alpha9/planner.mjs';
 import { plan as alpha10Plan } from '../scripts/legacy/alpha10/planner.mjs';
 import { plan as alpha11Plan } from '../scripts/legacy/alpha11/planner.mjs';
+import { plan as alpha12Plan } from '../scripts/legacy/alpha12/planner.mjs';
 import { hash } from '../src/runtime/diagnostics.mjs';
 import { replay } from '../scripts/replay-engine.mjs';
 import { makeGolden } from '../src/core/golden.mjs';
@@ -59,5 +60,11 @@ test('alpha10 diagnostics continue to replay after capture caching',async()=>{
 test('alpha11 diagnostics continue to replay after planner isolation',async()=>{
  const input={...clone(scenario(10)),engineVersion:'9.0.0-alpha.11'};
  const snapshot={schemaVersion:1,input,inputHash:await hash(input),decision:alpha11Plan(input)};
+ assert.equal((await replay(snapshot)).matches,true);
+});
+
+test('alpha12 diagnostics continue to replay after bounded capture and long goals',async()=>{
+ const input={...clone(scenario(10)),engineVersion:'9.0.0-alpha.12'};
+ const snapshot={schemaVersion:1,input,inputHash:await hash(input),decision:alpha12Plan(input)};
  assert.equal((await replay(snapshot)).matches,true);
 });

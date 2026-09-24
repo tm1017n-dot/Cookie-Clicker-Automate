@@ -20,6 +20,6 @@ function bundle({entry,modules},prefix='',suffix=''){
 const main=collect('src/runtime/browser.mjs');
 const workerBuild=collect('src/runtime/planner-worker.mjs');
 const worker=bundle(workerBuild);
-const meta=`// ==UserScript==\n// @name Cookie Clicker Auto Rebuild\n// @namespace cc-smart-auto\n// @version 9.0.0-alpha.12\n// @description Reproducible planner, exclusive purchases and diagnostic replay.\n// @match https://orteil.dashnet.org/cookieclicker/*\n// @grant none\n// @run-at document-idle\n// ==/UserScript==\n`;
+const meta=`// ==UserScript==\n// @name Cookie Clicker Auto Rebuild\n// @namespace cc-smart-auto\n// @version 9.0.0-alpha.13\n// @description Reproducible planner, exclusive purchases and diagnostic replay.\n// @match https://orteil.dashnet.org/cookieclicker/*\n// @grant none\n// @run-at document-idle\n// ==/UserScript==\n`;
 const result=meta+bundle(main,`globalThis.__CC_AUTO_PLANNER_WORKER_SOURCE__=${JSON.stringify(worker)};`,`delete globalThis.__CC_AUTO_PLANNER_WORKER_SOURCE__;`);
 mkdirSync(resolve(root,'dist'),{recursive:true});writeFileSync(resolve(root,'dist/Cookie_Clicker_Auto_Rebuild.user.js'),result);console.log('Built '+main.modules.size+' main modules and '+workerBuild.modules.size+' worker modules, '+Buffer.byteLength(result)+' bytes');

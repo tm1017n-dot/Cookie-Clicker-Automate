@@ -1,5 +1,7 @@
 # 引き継ぎ資料
 
+alpha.13（2026-09-25）：状態取得を1周期最大4回のCalculateGainsへ制限し、Upgrade測定を複数周期へ分割。短期3手探索に加えて、次の施設Tier 2段階・Kitten 3段階等を最大512行動の目標経路として比較。自動試験146件。詳細は[分割測定と長期目標](rebuild/BOUNDED_CAPTURE_LONG_GOALS_ALPHA13.md)。ブラウザ検証なし。
+
 alpha.12（2026-09-25）：約60回/秒と1.5秒周期の停止報告に対し、純粋PlannerをWeb Workerへ分離。可視タブの最大2秒の停止は最大5回ずつ補完し、非表示時間は破棄。自動試験143件。詳細は[Planner Worker](rebuild/PLANNER_WORKER_ALPHA12.md)。ブラウザ検証なし。
 
 alpha.11（2026-09-25）：要求・実クリックとも約50回/秒で周期的に停止する報告を、1.5秒周期の反復CalculateGainsがメインスレッドを占有する問題として改善。状態不変時の限界生産測定を再利用し、ロック中施設の測定を省略。自動試験140件。詳細は[状態取得キャッシュ](rebuild/CAPTURE_CACHE_ALPHA11.md)。ブラウザ検証なし。

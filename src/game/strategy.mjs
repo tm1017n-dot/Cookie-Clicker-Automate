@@ -8,12 +8,12 @@ export function strategyMetadata(g,buildings){
   const extras=new Map(),synergies=[],milestones=[],kittenPowers=[];
   const all=Object.values(g.UpgradesById??{}).filter(Boolean);
   const ordinaryCats=cats.map(([key,power,unlock])=>({u:g.Upgrades?.[key],power,unlock})).filter(x=>x.u);
-  const nextCat=ordinaryCats.find(x=>x.unlock && !x.u.bought && !x.u.unlocked);
+  const futureCats=new Set(ordinaryCats.filter(x=>x.unlock && !x.u.bought && !x.u.unlocked).slice(0,3).map(x=>x.u));
   for(const {u,power,unlock} of ordinaryCats){
     if(u.bought)kittenPowers.push(power);
     const effect={kittenPower:power};
     if(has(g,'Cat ladies') && g.UpgradesByPool?.kitten?.includes(u))effect.buildingMultipliers=[{id:1,multiplier:1.29}];
-    extras.set(u.id,{effect,future:u===nextCat?.u,requiresAchievements:unlock??0,source:'kitten-milk-formula'});
+    extras.set(u.id,{effect,future:futureCats.has(u),requiresAchievements:unlock??0,source:'kitten-milk-formula'});
   }
   for(const u of all){
     const a=u.buildingTie1,b=u.buildingTie2,t=g.Tiers?.[u.tier];

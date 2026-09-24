@@ -17,10 +17,10 @@ function tierGame(){
    g.cookiesPs=cursor.storedTotalCps+b.storedTotalCps;g.unbuffedCps=g.cookiesPs;g.computedMouseCps=g.mouseCps();
  };g.CalculateGains();return g;
 }
-test('next ordinary tier is captured at zero buildings without guessing special tiers',()=>{
+test('next two ordinary tiers are captured at zero buildings without guessing special tiers',()=>{
  const g=tierGame(),input=new GameAdapter(()=>g).capture(DEFAULT_CONFIG),next=input.state.offers.find(o=>o.targetId===10);
  assert.deepEqual(next.requiresBuildings,[{id:1,amount:1}]);assert.equal(next.rootOnly,false);assert.deepEqual(next.effect,{buildingMultipliers:[{id:1,multiplier:2}]});
- assert.equal(input.state.offers.some(o=>o.targetId===11||o.targetId===13),false);
+ assert.equal(input.state.offers.some(o=>o.targetId===11),true);assert.equal(input.state.offers.some(o=>o.targetId===12||o.targetId===13),false);
 });
 test('real TieredUpgrade buildingTie1 metadata remains a reusable model',()=>{
  const g=tierGame(),u=g.UpgradesById[10];g.ObjectsById[1].amount=1;u.unlocked=1;g.UpgradesInStore.push(u);g.CalculateGains();
@@ -29,7 +29,7 @@ test('real TieredUpgrade buildingTie1 metadata remains a reusable model',()=>{
 });
 test('locked future tiers add no CalculateGains pass',()=>{
  const g=tierGame(),calculate=g.CalculateGains;let count=0;g.CalculateGains=()=>{count++;calculate();};
- new GameAdapter(()=>g).capture(DEFAULT_CONFIG);assert.equal(count,6);
+ const input=new GameAdapter(()=>g).capture(DEFAULT_CONFIG);assert.equal(count,4);assert.ok(input.observation.pendingMeasurements>=1);
 });
 test('unshackled ordinary tiers use the audited extra multiplier',()=>{
  const g=tierGame();g.ObjectsById[1].unshackleUpgrade='building-unshackle';g.Tiers[1].unshackleUpgrade='tier-unshackle';g.Has=()=>true;

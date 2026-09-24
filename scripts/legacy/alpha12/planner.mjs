@@ -36,9 +36,8 @@ export function plan(input) {
   if (commitment && s.owned.includes(commitment.targetId)) commitment = null;
   const target = commitment ? offers.find(o => o.id === commitment.targetId) : null;
   const unlockBudget={remaining:c.maxUnlockNodes};
-  const goalDistance=o=>(o.requiresBuildings??[]).reduce((n,r)=>n+Math.max(0,r.amount-(s.buildings.find(b=>b.id===r.id)?.amount??0)),0)+Math.max(0,(o.requiresAchievements??0)-(s.production?.achievements??0));
   const routes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0 || o.requiresAchievements))
-    .sort((a,b)=>Number(b.id===commitment?.targetId)-Number(a.id===commitment?.targetId) || goalDistance(a)-goalDistance(b) || a.price-b.price || a.id.localeCompare(b.id,'en'))
+    .sort((a,b)=>Number(b.id===commitment?.targetId)-Number(a.id===commitment?.targetId) || a.id.localeCompare(b.id,'en'))
     .map(o=>unlockRoute(s,o.id,c,unlockBudget));
   const targetRoute=target && !target.eligible?routes.find(r=>r.targetId===target.id):null;
   const finiteT = candidates.filter(o => o.eligible && o.waitSeconds.status === 'known' && o.paybackSeconds.status === 'known').map(o => o.waitSeconds.value + o.paybackSeconds.value);

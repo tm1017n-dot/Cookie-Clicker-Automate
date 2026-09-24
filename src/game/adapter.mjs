@@ -8,6 +8,7 @@ import { captureGolden,goldenUpgradeEffect } from './golden.mjs';
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
 const AUTOMATION_CLICK_GAP_MS=25;
+const MAX_MEASUREMENT_PASSES=4;
 const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.UpgradesInStore,
   g.buffs, g.effs, g.cookiesPsByType, g.cookiesMultByType, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
   ...collection(g.AchievementsById), ...Object.values(g.buffs || {}), ...collection(g.wrinklers)];
@@ -91,8 +92,8 @@ export class GameAdapter {
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
     const cacheHit=this.measurementCache?.signature===measurementSignature;
     const measurements=cacheHit?this.measurementCache:{signature:measurementSignature,steady:null,buildings:new Map(),upgrades:new Map()};
-    let measurementPasses=0;
-    const runMeasure=(change,touched,probe=false)=>{measurementPasses++;return this.measure(change,touched,probe);};
+    let measurementPasses=0,remainingPasses=MAX_MEASUREMENT_PASSES;
+    const runMeasure=(change,touched,probe=false)=>{if(remainingPasses<=0)return null;remainingPasses--;measurementPasses++;return this.measure(change,touched,probe);};
     const steady = measurements.steady??runMeasure(x => { x.buffs = {}; }, [], true);
     measurements.steady=steady;
     const fraction=steady.fraction;
@@ -101,9 +102,9 @@ export class GameAdapter {
     const buildings = collection(g.ObjectsById).map(b => {
       const price = this.price('building',b.id);
       const unit = Math.max(0,(b.storedCps ?? (b.amount ? b.storedTotalCps/b.amount : 0)) * steady.global);
-      const needsMeasure=!b.locked || (probeLockedNonCursor && b.id===firstNonCursor);
+      const needsMeasure=b.id===0 || (probeLockedNonCursor && b.id===firstNonCursor);
       let measured=measurements.buildings.get(b.id);
-      if(!measured && needsMeasure){measured=runMeasure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; }, []);measurements.buildings.set(b.id,measured);}
+      if(!measured && needsMeasure){measured=runMeasure(x => { x.buffs={}; b.amount++; b.bought++; x.BuildingsOwned++; }, []);if(measured)measurements.buildings.set(b.id,measured);}
       measured??={passive:steady.passive+unit,mouse:steady.mouse+fraction*unit};
       const passiveDelta = measured.passive - steady.passive;
       const clickDelta = measured.mouse - steady.mouse;
@@ -113,7 +114,7 @@ export class GameAdapter {
         unitCps:unit,nextPrice:price,priceAtAmount:b.amount,growth:g.priceIncrease ?? 1.15,
         unroundedNextPrice:typeof g.modifyBuildingPrice==='function' ? finite(g.modifyBuildingPrice(b,b.basePrice*(g.priceIncrease??1.15)**Math.max(0,b.amount-(b.free??0))),'raw-price') : price,disabled:!!b.locked,
         effectOverride:crossEffect ? {building:b.id,flatPassive:passiveDelta-unit,flatClick:residual} : null,
-        rootOnly:crossEffect, measurement:{passive:passiveDelta,mouse:clickDelta} };
+        rootOnly:crossEffect, measurementExact:needsMeasure && measurements.buildings.has(b.id),measurement:{passive:passiveDelta,mouse:clickDelta} };
     });
     const offered = new Set((g.UpgradesInStore || []).map(u => u.id));
     const {production,extras}=strategyMetadata(g,buildings),golden=captureGolden(g,config);
@@ -123,6 +124,7 @@ export class GameAdapter {
       buffs:[],offers:[],clickUnit:steady.mouse-fraction*steady.passive-clickPerBuilding*nonCursor,clickFraction:fraction,nonCursorClick:clickPerBuilding,clickRate:1};
     const agrees=(a,b)=>Math.abs(a-b)<=Math.max(1e-8,Math.abs(b)*1e-6);
     for(const b of buildings){
+      if(!b.measurementExact){b.rootOnly=false;b.effectOverride=null;continue;}
       const d=effectDelta({...baseState,production:{...production,milestones:[]}},{effect:{building:b.id}});
       const dp=d.liquid-d.click,extraPassive=b.measurement.passive-dp,extraClick=b.measurement.mouse-d.click-fraction*extraPassive;
       b.rootOnly=!agrees(dp,b.measurement.passive)||!agrees(d.click,b.measurement.mouse);
@@ -131,19 +133,25 @@ export class GameAdapter {
     const nextTiers=new Map();
     for(const u of collection(g.UpgradesById)){
       const tier=normalTier(g,u);if(u.bought || u.unlocked || !tier)continue;
-      const current=nextTiers.get(tier.buildingId);
-      if(!current || tier.amount<current.tier.amount || (tier.amount===current.tier.amount && u.id<current.upgrade.id))nextTiers.set(tier.buildingId,{upgrade:u,tier});
+      const candidates=nextTiers.get(tier.buildingId)??[];candidates.push({upgrade:u,tier});
+      candidates.sort((a,b)=>a.tier.amount-b.tier.amount||a.upgrade.id-b.upgrade.id);nextTiers.set(tier.buildingId,candidates.slice(0,2));
     }
-    const futureIds=new Set([...nextTiers.values()].map(x=>x.upgrade.id));
+    const futureIds=new Set([...nextTiers.values()].flat().map(x=>x.upgrade.id));
     for(const [id,extra] of extras)if(extra.future)futureIds.add(id);
-    const offers = collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2 || futureIds.has(u.id))).map(u => {
-      const price = this.price('upgrade',u.id);
-      const tier=normalTier(g,u),future=futureIds.has(u.id) && !offered.has(u.id),extra=extras.get(u.id);
-      const gcEffect=goldenUpgradeEffect(g,u,golden.model);
-      const disallowed = ['prestige','debug','toggle'].includes(u.pool) || (!refreshOnly(u.buyFunction) && !extra?.callbackAllowed) || Boolean(u.toggleInto) || Boolean(u.ask) || (u.priceLumps??0)>0;
+    const upgradePool=collection(g.UpgradesById).filter(u => !u.bought && (offered.has(u.id) || u.id <= 2 || futureIds.has(u.id)));
+    const upgradeInfo=new Map(upgradePool.map(u=>{
+      const price=this.price('upgrade',u.id),tier=normalTier(g,u),future=futureIds.has(u.id)&&!offered.has(u.id),extra=extras.get(u.id),gcEffect=goldenUpgradeEffect(g,u,golden.model);
+      const disallowed=['prestige','debug','toggle'].includes(u.pool)||(!refreshOnly(u.buyFunction)&&!extra?.callbackAllowed)||Boolean(u.toggleInto)||Boolean(u.ask)||(u.priceLumps??0)>0;
+      return [u.id,{price,tier,future,extra,gcEffect,disallowed,modeled:u.id<=2||!!tier||!!extra||!!gcEffect||!!metadataEffect(g,u)}];
+    }));
+    const probeIds=new Set(upgradePool.filter(u=>{const x=upgradeInfo.get(u.id);return !x.future&&!x.disallowed&&!measurements.upgrades.has(u.id);})
+      .sort((a,b)=>{const x=upgradeInfo.get(a.id),y=upgradeInfo.get(b.id);return Number(x.modeled)-Number(y.modeled)||Number(x.price>g.cookies)-Number(y.price>g.cookies)||Number(!offered.has(a.id))-Number(!offered.has(b.id))||x.price-y.price||a.id-b.id;})
+      .slice(0,remainingPasses).map(u=>u.id));
+    const offers = upgradePool.map(u => {
+      const {price,tier,future,extra,gcEffect,disallowed}=upgradeInfo.get(u.id);
       // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
       let measured=future||disallowed?null:measurements.upgrades.get(u.id);
-      if(!measured && !future && !disallowed){measured=runMeasure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);measurements.upgrades.set(u.id,measured);}
+      if(!measured && probeIds.has(u.id)){measured=runMeasure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);if(measured)measurements.upgrades.set(u.id,measured);}
       const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }
@@ -176,8 +184,8 @@ export class GameAdapter {
         requiresBuildings:u.id<=2 ? [{id:0,amount:u.id===2 ? 10 : 1}] : extra?.requiresBuildings??(future&&tier?[{id:tier.buildingId,amount:tier.amount}]:[]),
         ...(extra?.requiresOwned?{requiresOwned:extra.requiresOwned}:{}),...(extra?.requiresAchievements?{requiresAchievements:extra.requiresAchievements}:{}),
         ...(extra?.research?{research:true,researchReady:extra.researchReady,availableAt:extra.availableAt}:{}),
-        evidence:extra?[{source:extra.source,coverage:rootOnly?'current-state-production':'dynamic-model',passiveDelta,mouseDelta}]:gcEffect?[{source:'natural-golden-scenarios',coverage:'sampled-expectation'}]:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains + audited metadata',coverage:disallowed?'disabled':!rootOnly?'reusable':'current-state-production',passiveDelta,mouseDelta}],
-        warnings:disallowed?['special-operation-not-enabled']:(effect?[]:['unknown-effect'])};
+        evidence:extra?[{source:extra.source,coverage:rootOnly?'current-state-production':'dynamic-model',passiveDelta,mouseDelta}]:gcEffect?[{source:'natural-golden-scenarios',coverage:'sampled-expectation'}]:future?[{source:'Game.Tiers + building.tieredUpgrades',coverage:'next-ordinary-tier',unlockAmount:tier.amount,multiplier:tier.multiplier}]:[{source:'Game.CalculateGains + audited metadata',coverage:disallowed?'disabled':measured?(!rootOnly?'reusable':'current-state-production'):'pending-measurement',passiveDelta,mouseDelta}],
+        warnings:disallowed?['special-operation-not-enabled']:(effect?[]:[!future?'measurement-pending':'unknown-effect'])};
     });
     const sum = buildings.reduce((n,b) => n+b.unitCps*b.amount,0);
     const wither = g.cpsSucked || 0;
@@ -191,10 +199,11 @@ export class GameAdapter {
     input.stochasticModel={seed:golden.model?.seed??0,samples:golden.model?.sampleCount??0,mode:golden.model?'natural-golden-scenarios':'deterministic-base'};
     input.environment={ gameVersion:String(g.version),language:globalThis.locId ?? 'unknown',fps:g.fps,
       observedAt:new Date().toISOString() };
+    const pendingMeasurements=upgradePool.filter(u=>{const x=upgradeInfo.get(u.id);return !x.future&&!x.disallowed&&!measurements.upgrades.has(u.id);}).length;
     input.observation={ signature, bank:g.cookies,displayedCps:g.cookiesPs,unbuffedCps:g.unbuffedCps,
       clickUnit:g.mouseCps(),requestedClickRate:config.clickRate,measuredClickRate:measuredRate,
       achievements:collection(g.AchievementsById).filter(a => a.won).map(a => a.id), milk:g.milkProgress ?? 0,
-      measurementCache:cacheHit?'hit':'miss',measurementPasses,ruleset:RULESET_VERSION };
+      measurementCache:!cacheHit?(pendingMeasurements?'miss-partial':'miss'):measurementPasses?(pendingMeasurements?'fill-partial':'filled'):'hit',measurementPasses,pendingMeasurements,ruleset:RULESET_VERSION };
     if (signature !== this.signature()) throw new Error('capture-state-changed');
     this.measurementCache=measurements;
     return freeze(input);

@@ -66,17 +66,17 @@ test('SAFE-02 restoration failure permanently disables adapter writes',()=>{cons
 test('Adapter captures exact input while preserving Game descriptors',()=>{const g=mockGame(),a=new GameAdapter(()=>g),before=canonical({cookies:g.cookies,owned:g.UpgradesOwned,buildings:g.ObjectsById.map(b=>[b.amount,b.bought,b.storedCps]),upgrades:g.UpgradesById.map(u=>u.bought)}),win=g.Win,effs=g.effs;a.capture(DEFAULT_CONFIG);assert.equal(canonical({cookies:g.cookies,owned:g.UpgradesOwned,buildings:g.ObjectsById.map(b=>[b.amount,b.bought,b.storedCps]),upgrades:g.UpgradesById.map(u=>u.bought)}),before);assert.equal(g.Win,win);assert.equal(g.effs,effs);});
 test('unchanged captures reuse marginal measurements while refreshing volatile values',()=>{
  const g=mockGame(),original=g.CalculateGains;let calls=0;g.CalculateGains=()=>{calls++;original();};const a=new GameAdapter(()=>g);
- const first=a.capture(DEFAULT_CONFIG);assert.ok(calls>0);calls=0;
- g.cookies=123;g.cookiesEarned=456;const second=a.capture(DEFAULT_CONFIG);
- assert.equal(calls,0);assert.equal(second.state.bank,123);assert.equal(second.state.earned,456);
- g.ObjectsById[0].amount++;g.ObjectsById[0].bought++;original();calls=0;a.capture(DEFAULT_CONFIG);assert.ok(calls>0);
- assert.equal(first.observation.measurementCache,'miss');assert.equal(second.observation.measurementCache,'hit');
+ const first=a.capture(DEFAULT_CONFIG);assert.equal(calls,4);calls=0;
+ g.cookies=123;g.cookiesEarned=456;const second=a.capture(DEFAULT_CONFIG);assert.equal(calls,1);calls=0;
+ const third=a.capture(DEFAULT_CONFIG);assert.equal(calls,0);assert.equal(third.state.bank,123);assert.equal(third.state.earned,456);
+ g.ObjectsById[0].amount++;g.ObjectsById[0].bought++;original();calls=0;a.capture(DEFAULT_CONFIG);assert.ok(calls>0&&calls<=4);
+ assert.equal(first.observation.measurementCache,'miss-partial');assert.equal(second.observation.measurementCache,'filled');assert.equal(third.observation.measurementCache,'hit');
 });
 test('locked buildings do not run hypothetical production passes',()=>{
  const g=mockGame(),original=g.CalculateGains;g.ObjectsById.push({id:1,name:'Grandma',amount:0,bought:0,level:0,locked:1,storedCps:1,storedTotalCps:0,basePrice:100,synergies:[],tieredAchievs:{},getPrice(){return 100;}});
  let calls=0;g.CalculateGains=()=>{calls++;original();};new GameAdapter(()=>g).capture(DEFAULT_CONFIG);
- // Baseline + Cursor + three offered upgrades; the locked Grandma adds no pass.
- assert.equal(calls,5);
+ // Baseline + Cursor + two queued upgrades; the locked Grandma adds no pass and the cycle is capped.
+ assert.equal(calls,4);
 });
 test('SAFE-01 restores after calculate exception',()=>{const g=mockGame(),a=new GameAdapter(()=>g),win=g.Win;g.CalculateGains=()=>{g.cookies=999;g.ObjectsById[0].amount=77;throw new Error('injected');};assert.throws(()=>a.measure(x=>{x.UpgradesById[0].bought=1;}));assert.equal(g.cookies,0);assert.equal(g.ObjectsById[0].amount,1);assert.equal(g.UpgradesById[0].bought,0);assert.equal(g.Win,win);});
 for(const failure of ['false','throw'])test('RES-0'+(failure==='false'?2:3)+' no fallback after '+failure,()=>{const {g,a,input,d}=setup();let facilityCalls=0;g.ObjectsById[0].buy=()=>{facilityCalls++;};g.UpgradesById[0].buy=()=>{if(failure==='throw')throw new Error('buy-failed');return false;};const e=new Executor(a,()=>true),r=e.execute(d,input,'1');assert.equal(r.attemptCount,1);assert.equal(facilityCalls,0);assert.equal(d.nextCommitment.targetId,'upgrade:0');assert.equal(e.execute(d,input,'1').status,'duplicate-cycle');});

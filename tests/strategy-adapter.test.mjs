@@ -44,3 +44,9 @@ test('research callback is permitted only for the audited next step and stopped 
  assert.equal(extra.get(200).callbackAllowed,true);assert.equal(extra.get(201).availableAt,3);assert.equal(extra.has(205),false);
  g.Upgrades[names[0]].buyFunction=function(){Game.Reset();};assert.equal(strategyMetadata(g,g.ObjectsById.map(b=>({...b}))).extras.get(200).callbackAllowed,false);
 });
+test('three future kitten goals are exposed for long-range comparison',()=>{
+ const g=game(),names=['Kitten helpers','Kitten workers','Kitten engineers','Kitten overseers'];
+ for(const [i,name] of names.entries()){const u={id:300+i,name,bought:0,unlocked:0,pool:'kitten',getPrice:()=>1000};g.Upgrades[name]=u;g.UpgradesById[u.id]=u;}
+ const extras=strategyMetadata(g,g.ObjectsById.map(b=>({...b}))).extras;
+ assert.deepEqual(names.map(name=>extras.get(g.Upgrades[name].id).future),[true,true,true,false]);
+});

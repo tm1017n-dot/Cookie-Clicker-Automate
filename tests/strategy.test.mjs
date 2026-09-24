@@ -12,6 +12,12 @@ test('unlock route accounts for every price increase and prerequisite',()=>{
  const input=makeInput(tierState()),route=unlockRoute(input.state,'upgrade:7',input.config);
  assert.equal(route.status,'known');assert.equal(route.path.length,5);assert.deepEqual(route.path.map(s=>s.action.price),[10,12,14,16,200]);assert.equal(route.cost,252);assert.ok(route.state.owned.includes('upgrade:7'));assert.equal(input.state.buildings[0].amount,1);
 });
+test('goal route reaches milestones beyond the local search depth',()=>{
+ const input=makeInput({bank:1e12,buildings:[{id:1,amount:0,unitCps:1,nextPrice:10,unroundedNextPrice:10,priceAtAmount:0,growth:1.15}],offers:[
+  {id:'upgrade:far',kind:'upgrade',targetId:77,price:100,requiresBuildings:[{id:1,amount:40}],effect:{buildingMultipliers:[{id:1,multiplier:10}]}}
+ ]}),route=unlockRoute(input.state,'upgrade:far',input.config);
+ assert.equal(route.status,'known');assert.equal(route.path.length,41);assert.equal(route.path[0].action.id,'building:1');assert.equal(route.path.at(-1).action.id,'upgrade:far');
+});
 test('valuable unlock beyond ordinary search depth changes the first action',()=>{
  const input=makeInput(tierState()),d=plan(input);assert.equal(d.selectedAction.id,'building:1');assert.equal(d.nextCommitment.targetId,'upgrade:7');
  assert.equal(d.unlockPaths.find(r=>r.targetId==='upgrade:7').steps.length,5);

@@ -45,6 +45,7 @@ export function mountPanel(runtime,document){
     if(d?.goldenModel)status.textContent+='\n自然GC：'+d.goldenModel.samples+'通りの予測で評価（利益は購入資金に含めません）';
     if(d?.allCandidates.some(o=>o.research))status.textContent+='\n研究：完了待ち時間を含めて比較';
     if(runtime.last?.timings?.captureMs!=null)status.textContent+='\n状態取得：約'+runtime.last.timings.captureMs.toFixed(1)+'ms ／ 戦略計算：約'+runtime.last.timings.plannerMs.toFixed(1)+'ms（'+(runtime.last.timings.plannerMode==='worker'?'Worker':'画面処理')+'）';
+    if(runtime.last?.input?.observation?.pendingMeasurements)status.textContent+='\n効果測定：残り'+runtime.last.input.observation.pendingMeasurements+'件（次周期へ分割）';
     if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,reservationReview:d.reservationReview,comparison:d.comparison,unlockPaths:d.unlockPaths,goldenModel:d.goldenModel,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}
     mode.textContent=runtime.config.observeOnly?'自動化を開始':'観測モードへ';mode.disabled=runtime.stopped;
     collapse.textContent=layout.collapsed()?'展開':'折りたたむ';collapse.setAttribute('aria-expanded',String(!layout.collapsed()));
