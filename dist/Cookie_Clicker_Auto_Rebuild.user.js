@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.9
+// @version 9.0.0-alpha.10
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
 // @grant none
@@ -39,6 +39,7 @@ const { captureGolden,goldenUpgradeEffect }=require("src/game/golden.mjs");
 
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
+const AUTOMATION_CLICK_GAP_MS=25;
 const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.UpgradesInStore,
   g.buffs, g.effs, g.cookiesPsByType, g.cookiesMultByType, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
   ...collection(g.AchievementsById), ...Object.values(g.buffs || {}), ...collection(g.wrinklers)];
@@ -232,10 +233,10 @@ class GameAdapter {
   click(requestedRate = 50) {
     if (this.busy || !this.playable()) return false;
     const g=this.game,before=g.cookieClicks;
-    // Web 2.058 rejects calls less than 20ms apart. Permit the configured automation
-    // rate through the normal click handler; never multiply cookie rewards directly.
+    // Web 2.058 rejects calls less than 20ms apart. Keep a margin for clock granularity
+    // while using the normal click handler; never multiply cookie rewards directly.
     const lastClick=g.lastClick;
-    if(requestedRate>50 && Number.isFinite(lastClick))g.lastClick=Math.min(lastClick,Date.now()-20);
+    if(requestedRate>50 && Number.isFinite(lastClick))g.lastClick=Math.min(lastClick,Date.now()-AUTOMATION_CLICK_GAP_MS);
     try { g.ClickCookie(); return g.cookieClicks>before; }
     finally { if(g.cookieClicks===before && requestedRate>50 && Number.isFinite(lastClick))g.lastClick=lastClick; }
   }
@@ -250,7 +251,7 @@ class GameAdapter {
 Object.assign(exports,{GameAdapter});
 },
 "src/core/contracts.mjs":function(require,exports){
-const ENGINE_VERSION = '9.0.0-alpha.9';
+const ENGINE_VERSION = '9.0.0-alpha.10';
 const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
@@ -818,9 +819,9 @@ const MAX_CLICK_BATCH=5;
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.9';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.10';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
-    this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
+    this.cycle=0;this.timers=[];this.clicks=[];this.clickAttempts=[];this.started=clock();this.error=null;this.last=null;
     this.lastClickTick=null;this.clickCredit=0;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
     this.snapshot=()=>this.diagnostics.latest();
@@ -840,6 +841,7 @@ class Coordinator {
     this.onUpdate(this);
   }
   measuredClickRate(){const now=this.clock();this.clicks=this.clicks.filter(t=>now-t<5000);return this.config.observeOnly || !this.config.autoClick?0:this.clicks.length/Math.max(.001,Math.min(5,(now-this.started)/1000));}
+  attemptedClickRate(){const now=this.clock();this.clickAttempts=this.clickAttempts.filter(t=>now-t<5000);return this.config.observeOnly || !this.config.autoClick?0:this.clickAttempts.length/Math.max(.001,Math.min(5,(now-this.started)/1000));}
   clickRate(){return this.measuredClickRate();}
   clickTick(){
     if(!this.owns() || this.config.observeOnly || !this.config.autoClick || this.error)return;
@@ -856,6 +858,7 @@ class Coordinator {
     this.clickCredit-=due;
     try{
       for(let n=0;n<due;n++){
+        this.clickAttempts.push(now);
         if(!this.adapter.click(this.config.clickRate)){this.clickCredit=0;break;}
         this.clicks.push(now);
       }
@@ -873,7 +876,7 @@ class Coordinator {
       const runIdentity=this.adapter.runIdentity();
       if(this.runIdentity!==undefined && this.runIdentity!==runIdentity){
         this.commitment=null;this.executor=new Executor(this.adapter,()=>this.owns(),this.clock);
-        this.started=this.clock();this.clicks=[];
+        this.started=this.clock();this.clicks=[];this.clickAttempts=[];this.lastClickTick=null;this.clickCredit=0;
       }
       this.runIdentity=runIdentity;
       const pending=this.executor.poll();
@@ -914,7 +917,7 @@ class Coordinator {
     if(!Number.isInteger(value) || value<1 || value>100)throw new TypeError('クリック速度は1〜100の整数で指定してください');
     this.config.clickRate=value;this.clearCommitment();this.resume();
   }
-  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.lastClickTick=null;this.clickCredit=0;this.onUpdate(this);}
+  resume(){this.error=null;this.started=this.clock();this.clicks=[];this.clickAttempts=[];this.lastClickTick=null;this.clickCredit=0;this.onUpdate(this);}
   shutdown(){if(this.stopped)return;this.stopped=true;for(const t of this.timers)clearInterval(t);this.timers=[];this.diagnostics.close();this.onUpdate(this);}
 }
 
@@ -1340,7 +1343,7 @@ function mountPanel(runtime,document){
     unsupportedTitle.textContent=`未評価・購入対象外の強化（${unsupportedLines.length}件）`;
     unsupportedText.textContent=unsupportedLines.join('\n');
     if(d?.reasonCode==='WAIT_UNKNOWN_EFFECT')unsupported.open=true;
-    status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
+    status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 要求：約${runtime.attemptedClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
     if(d?.goldenModel)status.textContent+='\n自然GC：'+d.goldenModel.samples+'通りの予測で評価（利益は購入資金に含めません）';
     if(d?.allCandidates.some(o=>o.research))status.textContent+='\n研究：完了待ち時間を含めて比較';
     if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,reservationReview:d.reservationReview,comparison:d.comparison,unlockPaths:d.unlockPaths,goldenModel:d.goldenModel,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}

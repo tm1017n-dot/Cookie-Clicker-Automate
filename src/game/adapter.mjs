@@ -7,6 +7,7 @@ import { captureGolden,goldenUpgradeEffect } from './golden.mjs';
 
 const finite = (n,label) => { if (!Number.isFinite(n)) throw new Error('invalid-' + label); return n; };
 const collection = value => Object.values(value || {}).filter(Boolean);
+const AUTOMATION_CLICK_GAP_MS=25;
 const objects = g => [g, g.ObjectsById, g.UpgradesById, g.AchievementsById, g.UpgradesInStore,
   g.buffs, g.effs, g.cookiesPsByType, g.cookiesMultByType, g.cookieUpgrades, g.wrinklers, ...collection(g.ObjectsById), ...collection(g.UpgradesById),
   ...collection(g.AchievementsById), ...Object.values(g.buffs || {}), ...collection(g.wrinklers)];
@@ -200,10 +201,10 @@ export class GameAdapter {
   click(requestedRate = 50) {
     if (this.busy || !this.playable()) return false;
     const g=this.game,before=g.cookieClicks;
-    // Web 2.058 rejects calls less than 20ms apart. Permit the configured automation
-    // rate through the normal click handler; never multiply cookie rewards directly.
+    // Web 2.058 rejects calls less than 20ms apart. Keep a margin for clock granularity
+    // while using the normal click handler; never multiply cookie rewards directly.
     const lastClick=g.lastClick;
-    if(requestedRate>50 && Number.isFinite(lastClick))g.lastClick=Math.min(lastClick,Date.now()-20);
+    if(requestedRate>50 && Number.isFinite(lastClick))g.lastClick=Math.min(lastClick,Date.now()-AUTOMATION_CLICK_GAP_MS);
     try { g.ClickCookie(); return g.cookieClicks>before; }
     finally { if(g.cookieClicks===before && requestedRate>50 && Number.isFinite(lastClick))g.lastClick=lastClick; }
   }

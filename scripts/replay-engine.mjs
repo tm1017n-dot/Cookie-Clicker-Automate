@@ -5,8 +5,14 @@ import { plan as alpha5Plan } from './legacy/alpha5/planner.mjs';
 import { plan as alpha6Plan } from './legacy/alpha6/planner.mjs';
 import { plan as alpha7Plan } from './legacy/alpha7/planner.mjs';
 import { plan as alpha8Plan } from './legacy/alpha8/planner.mjs';
+import { plan as alpha9Plan } from './legacy/alpha9/planner.mjs';
 import { canonical } from '../src/core/contracts.mjs';
 export async function replay(snapshot){
+  if(snapshot.schemaVersion===1 && snapshot.input.engineVersion==='9.0.0-alpha.9' && snapshot.input.rulesetVersion==='cc-web-2.058/strategy-1'){
+    if(await hash(snapshot.input)!==snapshot.inputHash)throw new Error('InputChecksumMismatch');
+    const decision=alpha9Plan(snapshot.input);
+    return {matches:canonical(decision)===canonical(snapshot.decision),decision,engineVersion:'9.0.0-alpha.9'};
+  }
   if(snapshot.schemaVersion===1 && snapshot.input.engineVersion==='9.0.0-alpha.8' && snapshot.input.rulesetVersion==='cc-web-2.058/strategy-1'){
     if(await hash(snapshot.input)!==snapshot.inputHash)throw new Error('InputChecksumMismatch');
     const decision=alpha8Plan(snapshot.input);

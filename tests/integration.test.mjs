@@ -13,6 +13,11 @@ test('100Hz automation uses the normal handler despite the game cooldown',()=>{
  g.ClickCookie=()=>{if(Date.now()-g.lastClick<20)return;g.cookieClicks++;g.cookies+=1;g.lastClick=Date.now();};
  assert.equal(a.click(50),false);assert.equal(a.click(100),true);assert.equal(g.cookieClicks,1);assert.equal(g.cookies,1);
 });
+test('100Hz automation keeps margin beyond the exact 20ms game boundary',()=>{
+ const g=mockGame(),a=new GameAdapter(()=>g),now=Date.now();g.lastClick=now;
+ g.ClickCookie=()=>{if(Date.now()-g.lastClick<21)return;g.cookieClicks++;g.cookies+=1;g.lastClick=Date.now();};
+ assert.equal(a.click(100),true);assert.equal(a.click(100),true);assert.equal(g.cookieClicks,2);
+});
 test('rejected high rate click preserves cooldown and click count',()=>{
  const g=mockGame(),a=new GameAdapter(()=>g);g.lastClick=Date.now();const before=g.lastClick;g.ClickCookie=()=>{};
  assert.equal(a.click(100),false);assert.equal(g.lastClick,before);assert.equal(g.cookieClicks,0);
@@ -35,7 +40,7 @@ test('failed clicks stop the current recovery batch and are never counted',async
  let now=0,calls=0,accepted=0;const adapter={fault:null,click(){calls++;if(calls===3)return false;accepted++;return true;},collect(){return 0;}};
  const r=new Coordinator({},adapter,{config:{observeOnly:false},clock:()=>now});await r.start({timers:false});
  r.clickTick();now=50;r.clickTick();
- assert.equal(calls,3);assert.equal(accepted,2);assert.equal(r.clicks.length,2);
+ assert.equal(calls,3);assert.equal(accepted,2);assert.equal(r.clicks.length,2);assert.equal(r.clickAttempts.length,3);
  r.shutdown();
 });
 test('startup income uses only successful clicks, never the configured target',async()=>{

@@ -1,6 +1,6 @@
 # Cookie Clicker Automate
 
-再構築版 **9.0.0-alpha.9**: [導入・検証結果・対応範囲](docs/rebuild/IMPLEMENTATION.md) / [配布userscript](dist/Cookie_Clicker_Auto_Rebuild.user.js)。購入・待機・クリック・相乗効果・自然GC予測・初期研究経路・診断再生を実装した段階です。ミニゲーム等を含む全機能の完成版ではありません。
+再構築版 **9.0.0-alpha.10**: [導入・検証結果・対応範囲](docs/rebuild/IMPLEMENTATION.md) / [配布userscript](dist/Cookie_Clicker_Auto_Rebuild.user.js)。購入・待機・クリック・相乗効果・自然GC予測・初期研究経路・診断再生を実装した段階です。ミニゲーム等を含む全機能の完成版ではありません。
 
 Cookie Clicker Web版をTampermonkeyで自動操作し、短期の購入効率だけでなく、Upgrade解禁、クリック収益、Golden Cookieコンボ、ミニゲーム、Ascensionまで含めて進行を最適化するプロジェクトです。
 

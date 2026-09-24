@@ -41,7 +41,7 @@ export function mountPanel(runtime,document){
     unsupportedTitle.textContent=`未評価・購入対象外の強化（${unsupportedLines.length}件）`;
     unsupportedText.textContent=unsupportedLines.join('\n');
     if(d?.reasonCode==='WAIT_UNKNOWN_EFFECT')unsupported.open=true;
-    status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
+    status.textContent=`${runtime.stopped?'停止':runtime.config.observeOnly?'観測モード（購入・クリックなし）':'自動化中'}\n${runtime.error?'診断：'+runtime.error:d?(reasons[d.reasonCode]??d.reasonCode):'ゲーム状態を確認中'}\n対象：${name}${eta?.status==='known'?'（約'+Math.ceil(eta.value)+'秒）':''}\n実クリック：約${runtime.measuredClickRate().toFixed(1)}回/秒 ／ 要求：約${runtime.attemptedClickRate().toFixed(1)}回/秒 ／ 目標${runtime.config.clickRate}\n基本購入版：ミニゲーム自動操作は未対応`;
     if(d?.goldenModel)status.textContent+='\n自然GC：'+d.goldenModel.samples+'通りの予測で評価（利益は購入資金に含めません）';
     if(d?.allCandidates.some(o=>o.research))status.textContent+='\n研究：完了待ち時間を含めて比較';
     if(details.open && renderedDecision!==d){text.textContent=d?JSON.stringify({horizons:d.horizons,plan:d.plannedSteps,targetEta:d.targetEta,reservationReview:d.reservationReview,comparison:d.comparison,unlockPaths:d.unlockPaths,goldenModel:d.goldenModel,candidates:d.allCandidates,warnings:d.warnings,timings:runtime.last?.timings},null,2):'';renderedDecision=d;}

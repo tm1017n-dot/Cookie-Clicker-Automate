@@ -1,5 +1,7 @@
 # 再構築・詳細設計パッケージ
 
+100回/秒クリック境界と要求・成功の診断は[CLICK_GATE_ALPHA10](CLICK_GATE_ALPHA10.md)を参照。
+
 クリックタイマー遅延への上限付き補償は[CLICK_SCHEDULER_ALPHA9](CLICK_SCHEDULER_ALPHA9.md)を参照。
 
 解禁経路の状態コピー軽量化は[PERFORMANCE_ALPHA8](PERFORMANCE_ALPHA8.md)を参照。
