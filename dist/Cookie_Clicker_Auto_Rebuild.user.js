@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Cookie Clicker Auto Rebuild
 // @namespace cc-smart-auto
-// @version 9.0.0-alpha.7
+// @version 9.0.0-alpha.8
 // @description Reproducible planner, exclusive purchases and diagnostic replay.
 // @match https://orteil.dashnet.org/cookieclicker/*
 // @grant none
@@ -250,7 +250,7 @@ class GameAdapter {
 Object.assign(exports,{GameAdapter});
 },
 "src/core/contracts.mjs":function(require,exports){
-const ENGINE_VERSION = '9.0.0-alpha.7';
+const ENGINE_VERSION = '9.0.0-alpha.8';
 const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
@@ -816,7 +816,7 @@ const RUNTIME_KEY='__CC_SMART_AUTO_RUNTIME__';
 class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{}}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.7';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.version='9.0.0-alpha.8';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.started=clock();this.error=null;this.last=null;
     this.executor=new Executor(adapter,()=>this.owns(),clock);
@@ -1115,13 +1115,13 @@ function plan(input) {
 Object.assign(exports,{plan});
 },
 "src/core/unlocks.mjs":function(require,exports){
-const { clone }=require("src/core/contracts.mjs");
-const { offerById,applyAction,advance,eta,eligible }=require("src/core/model.mjs");
+const { offerById,applyAction,advance,eta,eligible,copyState }=require("src/core/model.mjs");
 const { achievementCount }=require("src/core/production.mjs");
 
 // Simulate the complete dependency cost without external side effects.
 function unlockRoute(initial,targetId,config,budget={remaining:256}){
-  let state=clone(initial),cost=0,limited=false;
+  // Only simulation-owned fields are writable; effect metadata can be shared.
+  let state=copyState(initial),cost=0,limited=false;
   const path=[],visiting=new Set();
   function buy(id){
     if(path.length>=config.maxUnlockSteps || budget.remaining<=0)throw new Error('unlock-budget');

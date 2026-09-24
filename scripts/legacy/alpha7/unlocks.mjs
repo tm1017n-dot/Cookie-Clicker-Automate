@@ -1,10 +1,10 @@
-import { offerById,applyAction,advance,eta,eligible,copyState } from './model.mjs';
+import { clone } from './contracts.mjs';
+import { offerById,applyAction,advance,eta,eligible } from './model.mjs';
 import { achievementCount } from './production.mjs';
 
 // Simulate the complete dependency cost without external side effects.
 export function unlockRoute(initial,targetId,config,budget={remaining:256}){
-  // Only simulation-owned fields are writable; effect metadata can be shared.
-  let state=copyState(initial),cost=0,limited=false;
+  let state=clone(initial),cost=0,limited=false;
   const path=[],visiting=new Set();
   function buy(id){
     if(path.length>=config.maxUnlockSteps || budget.remaining<=0)throw new Error('unlock-budget');
