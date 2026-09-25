@@ -26,7 +26,7 @@ function scenario(seed){
 test('lightweight unlock snapshots preserve alpha7 plans across routes and GC states',()=>{
  for(let seed=1;seed<=30;seed++){
   const input=scenario(seed),before=canonical(input);
-  const prior={...clone(input),engineVersion:'9.0.0-alpha.7'},current=plan(input),old=alpha7Plan(prior);
+  const prior={...clone(input),engineVersion:'9.0.0-alpha.7'},current=alpha8Plan({...clone(input),engineVersion:'9.0.0-alpha.8'}),old=alpha7Plan(prior);
   assert.equal(canonical(current),canonical(old),'decision seed '+seed);
   assert.equal(canonical(input),before,'input seed '+seed);
  }

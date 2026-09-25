@@ -90,14 +90,12 @@ export function applyEffect(s, e) {
   if (e.reward) { s.bank += e.reward; s.earned += e.reward; }
   if (e.buff) s.buffs.push(clone(e.buff));
 }
-export function applyAction(state, offer, purchaseIntervalMs = 0) {
+export function applyAction(state, offer) {
   const s = copyState(state);
   if (!offer?.effect || !offer.eligible || s.bank + epsilon(s.bank, offer.price) < offer.price + s.reserve) return null;
-  if ((s.nextPurchaseAt ?? 0) > s.elapsed + epsilon(s.elapsed,s.nextPurchaseAt ?? 0)) return null;
   s.bank = Math.max(0, s.bank - offer.price);
   applyEffect(s, offer.effect);
   if (offer.kind !== 'building' || offer.effect.building == null) s.owned.push(offer.id);
-  if(purchaseIntervalMs>0)s.nextPurchaseAt=s.elapsed+purchaseIntervalMs/1000;
   return s;
 }
 export function advance(state, seconds, maxEvents = 4096) {
@@ -128,8 +126,6 @@ export function advance(state, seconds, maxEvents = 4096) {
 }
 export function eta(state, price, maxEvents = 4096) {
   if (price == null || !Number.isFinite(price)) return Infinity;
-  const delay=Math.max(0,(state.nextPurchaseAt??0)-state.elapsed);
-  if(delay>0)return delay+eta(advance({...state,golden:null},delay,maxEvents),price,maxEvents);
   if(!state.events.length && !state.buffs.length){
     const need=price+state.reserve-state.bank;
     if(need<=epsilon(price+state.reserve,state.bank))return 0;

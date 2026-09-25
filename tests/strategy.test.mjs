@@ -55,7 +55,7 @@ test('unlock route includes prerequisite upgrades and their income during saving
 });
 test('availability waiting is recorded before a prerequisite purchase',()=>{
  const input=makeInput({bank:10,offers:[{id:'upgrade:1',kind:'upgrade',price:1,availableAt:10,effect:{flatPassive:10}},{id:'upgrade:2',kind:'upgrade',price:1,requiresOwned:['upgrade:1'],effect:{flatPassive:100}}]});
- const route=unlockRoute(input.state,'upgrade:2',input.config);assert.equal(route.path[0].wait,10);assert.equal(route.eta,10);
+ const route=unlockRoute(input.state,'upgrade:2',input.config);assert.equal(route.path[0].wait,10);assert.equal(route.eta,11.5);
 });
 const reservationState=()=>({bank:0,passive:1,commitment:{targetId:'upgrade:1',status:'saving'},offers:[
  {id:'upgrade:1',kind:'upgrade',targetId:1,price:1000,effect:{flatPassive:1}},

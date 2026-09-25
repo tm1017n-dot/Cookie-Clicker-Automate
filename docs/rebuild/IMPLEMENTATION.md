@@ -1,5 +1,9 @@
 # 再構築版 9.0.0-alpha.1 実装記録
 
+## 9.0.0-alpha.15 レビュー修正
+
+測定進捗、予約復帰、購入間隔を含む予測、未予約長期目標の比較を修正。[設計・検証と限界](REVIEW_FIXES_ALPHA15.md)を参照。
+
 ## 9.0.0-alpha.14 長期目標への先行投資
 
 Tier・Kitten等の直接経路に加え、将来購入する対象施設の倍率、関連Synergy、施設・Upgrade価格割引を先に購入する経路を比較する。候補は1目標6件・全体24経路へ制限し、購入後は再計画する。詳細は[GOAL_INVESTMENTS_ALPHA14](GOAL_INVESTMENTS_ALPHA14.md)。

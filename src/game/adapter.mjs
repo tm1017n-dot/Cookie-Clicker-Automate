@@ -78,7 +78,8 @@ export class GameAdapter {
       reserves:[g.lumps ?? 0,g.elderWrath ?? 0],achievements:g.AchievementsOwned??0,research:g.nextResearch??0,
       production:[g.unbuffedCps??null,g.globalCpsMult??null,g.mouseCps?.()??null,g.heralds??null],
       effects:Object.entries(g.effs??{}).filter(([,v])=>Number.isFinite(v)),
-      minigames:collection(g.ObjectsById).filter(b => b.minigameLoaded).map(b => [b.id,b.minigame?.magic ?? null,b.minigame?.swaps ?? null,b.minigame?.slot?.map?.(x=>x?.id??x??null)??null]),
+      // Magic regeneration changes neither facility/upgrade prices nor production.
+      minigames:collection(g.ObjectsById).filter(b => b.minigameLoaded).map(b => [b.id,b.minigame?.swaps ?? null,b.minigame?.slot?.map?.(x=>x?.id??x??null)??null]),
       ascend:!!(g.OnAscend || g.AscendTimer) });
   }
   capture(config, commitment = null, measuredRate = config.clickRate) {
@@ -87,6 +88,8 @@ export class GameAdapter {
     if (!this.playable()) throw new Error('game-not-playable');
     const signature = this.signature();
     const measurementSignature=signature+'|'+JSON.stringify((g.UpgradesInStore??[]).map(u=>u.id));
+    const identity=this.runIdentity();
+    if(this.measurementIdentity!==identity){this.measurementIdentity=identity;this.probeOrder=new Map();this.probeSequence=0;}
     const buffs = Object.values(g.buffs || {}).map(b => ({ id:b.id ?? b.name, remaining:Math.max(0,b.time/g.fps),
       passive:b.multCpS ?? 1,click:b.multClick ?? 1 }));
     if (Object.values(g.buffs || {}).some(b => b.name === 'Cursed finger')) throw new Error('unsupported-cursed-finger');
@@ -145,13 +148,13 @@ export class GameAdapter {
       return [u.id,{price,tier,future,extra,gcEffect,disallowed,modeled:u.id<=2||!!tier||!!extra||!!gcEffect||!!metadataEffect(g,u)}];
     }));
     const probeIds=new Set(upgradePool.filter(u=>{const x=upgradeInfo.get(u.id);return !x.future&&!x.disallowed&&!measurements.upgrades.has(u.id);})
-      .sort((a,b)=>{const x=upgradeInfo.get(a.id),y=upgradeInfo.get(b.id);return Number(x.modeled)-Number(y.modeled)||Number(x.price>g.cookies)-Number(y.price>g.cookies)||Number(!offered.has(a.id))-Number(!offered.has(b.id))||x.price-y.price||a.id-b.id;})
+      .sort((a,b)=>{const x=upgradeInfo.get(a.id),y=upgradeInfo.get(b.id);return Number('upgrade:'+b.id===commitment?.targetId)-Number('upgrade:'+a.id===commitment?.targetId)||(this.probeOrder.get(a.id)??0)-(this.probeOrder.get(b.id)??0)||Number(x.modeled)-Number(y.modeled)||Number(x.price>g.cookies)-Number(y.price>g.cookies)||Number(!offered.has(a.id))-Number(!offered.has(b.id))||x.price-y.price||a.id-b.id;})
       .slice(0,remainingPasses).map(u=>u.id));
     const offers = upgradePool.map(u => {
       const {price,tier,future,extra,gcEffect,disallowed}=upgradeInfo.get(u.id);
       // Locked ordinary tiers have audited metadata. Do not run hundreds of hypothetical gains passes.
       let measured=future||disallowed?null:measurements.upgrades.get(u.id);
-      if(!measured && probeIds.has(u.id)){measured=runMeasure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);if(measured)measurements.upgrades.set(u.id,measured);}
+      if(!measured && probeIds.has(u.id)){measured=runMeasure(x => { x.buffs={}; u.bought=1; if (x.CountsAsUpgradeOwned?.(u.pool)) x.UpgradesOwned++; }, [u]);if(measured){measurements.upgrades.set(u.id,measured);this.probeOrder.set(u.id,++this.probeSequence);}}
       const passiveDelta = measured?measured.passive-steady.passive:0, mouseDelta = measured?measured.mouse-steady.mouse:0;
       let effect = null, rootOnly = true, confidence = 'unknown';
       if (u.id <= 2) { effect={buildingMultipliers:[{id:0,multiplier:2}],clickMultiplier:2}; rootOnly=false; confidence='high'; }

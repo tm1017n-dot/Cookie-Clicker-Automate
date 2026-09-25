@@ -34,12 +34,7 @@ export function plan(input) {
   });
   let commitment = clone(s.commitment);
   if (commitment && s.owned.includes(commitment.targetId)) commitment = null;
-  let target = commitment ? offers.find(o => o.id === commitment.targetId) : null;
-  let reservationRecovery=null;
-  if(commitment&&!s.pendingExecution&&(!target||target.disabled)){
-    reservationRecovery={targetId:commitment.targetId,reason:!target?'target-missing':'target-disabled',released:true};
-    commitment=null;target=null;
-  }
+  const target = commitment ? offers.find(o => o.id === commitment.targetId) : null;
   const unlockBudget={remaining:c.maxUnlockNodes};
   const goalDistance=o=>(o.requiresBuildings??[]).reduce((n,r)=>n+Math.max(0,r.amount-(s.buildings.find(b=>b.id===r.id)?.amount??0)),0)+Math.max(0,(o.requiresAchievements??0)-(s.production?.achievements??0));
   const directRoutes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0 || o.requiresAchievements))
@@ -63,7 +58,7 @@ export function plan(input) {
     }).filter(x=>Number.isFinite(x.wait)&&x.related>0).sort((a,b)=>b.related-a.related||a.rank-b.rank||a.o.price-b.o.price||a.o.id.localeCompare(b.o.id,'en')).slice(0,c.maxGoalInvestments);
     for(const {o,wait} of investments){
       if(investmentRoutes.length>=c.maxGoalVariants||investmentBudget.remaining<=0)break;
-      const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=current&&applyAction(ready,current,c.purchaseIntervalMs);if(!after)continue;
+      const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=current&&applyAction(ready,current);if(!after)continue;
       const tail=unlockRoute(after,route.targetId,c,investmentBudget);if(tail.status!=='known')continue;
       const lead=after.elapsed-s.elapsed,path=[{action:buyAction(current),at:lead,wait},...tail.path.map(step=>({...step,at:lead+step.at}))];
       const combinedEta=lead+tail.eta;
@@ -76,7 +71,7 @@ export function plan(input) {
   const finiteT = candidates.filter(o => o.eligible && o.waitSeconds.status === 'known' && o.paybackSeconds.status === 'known').map(o => o.waitSeconds.value + o.paybackSeconds.value);
   const horizons = [...c.horizons];
   if (finiteT.length) horizons[2] = Math.max(horizons[2], 4 * Math.min(...finiteT));
-  for(const route of routes.filter(r=>r.status==='known')){
+  for(const route of routes.filter(r=>r.status==='known' && offers.find(o=>o.id===r.targetId)?.research)){
     const gain=income(route.state).economic-income(s).economic;
     if(gain>0)horizons[2]=Math.max(horizons[2],4*(route.eta+route.cost/gain));
   }
@@ -97,7 +92,6 @@ export function plan(input) {
     allCandidates: candidates, frontier: [], expandedNodes: [], prunedReasons: [],
     selectedAction: waitAction('WAIT_EVENT'), nextCommitment: commitment, plannedSteps: [],
     targetEta: null, reasonCode: 'WAIT_EVENT', warnings,
-    reservationRecovery,
     unlockPaths:[],singleStepNodes:[],comparison:{policy:'one-step-floor-for-partial-models',commonDepth:1,heldBack:[]},reservationReview:null,
     goldenModel:s.golden?{samples:s.golden.lanes.length,seed:s.golden.seed,maxSeconds:s.golden.maxSeconds,maxEvents:s.golden.maxEvents,riskWeight:c.riskWeight,baseline:baselineForecast,omitted:['chain-rewards','storm-rewards','drops','discount-buffs']}:null,
     coverage:{unmodeledAffordable:candidates.filter(o=>o.affordable&&!o.effect&&!o.disabled).map(o=>o.id),
@@ -107,7 +101,7 @@ export function plan(input) {
   if(commitment && target?.eligible && target.effect && eta(s,target.price,c.maxEvents)===0)return finish(buyAction(target),'BUY_TARGET',{...commitment,status:'ready'});
   function pathValues(path){return horizons.map(h=>{
     let at=s;
-    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,offerById(at,step.action.id),c.purchaseIntervalMs);if(!at)throw new Error('invalid-simulation-path');}
+    for(const step of path){if(step.at>h)break;at=advance(at,step.at-(at.elapsed-s.elapsed),c.maxEvents);at=applyAction(at,offerById(at,step.action.id));if(!at)throw new Error('invalid-simulation-path');}
     return values(at,s.elapsed,[h],c)[0];
   });}
   // Earlier horizons keep their parent's continuation value; only the new tail changes.
@@ -120,7 +114,7 @@ export function plan(input) {
   for(const o of offers){
     if(!o.eligible || !o.effect)continue;
     const wait=eta(s,o.price,c.maxEvents);if(!Number.isFinite(wait) || wait>=horizons[2])continue;
-    const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=applyAction(ready,current,c.purchaseIntervalMs);if(!after)continue;
+    const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=applyAction(ready,current);if(!after)continue;
     const path=[{action:buyAction(current),at:after.elapsed-s.elapsed,wait}],value=extendValues(root,after);
     singles.push({id:-singles.length-1,state:after,path,value,score:score(value),terminalOnly:!!o.rootOnly});
   }
@@ -141,7 +135,7 @@ export function plan(input) {
         if (!Number.isFinite(wait) || node.state.elapsed - s.elapsed + wait >= horizons[2]) continue;
         const ready = cached?null:advance(node.state,wait,c.maxEvents);
         const currentOffer = cached?cached.path[0].action:offerById(ready,o.id);
-        const after = cached?cached.state:applyAction(ready,currentOffer,c.purchaseIntervalMs);
+        const after = cached?cached.state:applyAction(ready,currentOffer);
         if (!after) continue;
         const path = cached?cached.path:[...node.path,{ action: buyAction(currentOffer), at: after.elapsed - s.elapsed, wait }];
         const v = cached?cached.value:extendValues(node,after);
@@ -191,14 +185,8 @@ export function plan(input) {
     return (a.path[0]?.action.price ?? 0)-(b.path[0]?.action.price ?? 0) || (a.path[0]?.action.id ?? 'wait').localeCompare(b.path[0]?.action.id ?? 'wait');
   });
   const best = frontier[0] ?? root;
-  if(commitment&&(!target?.effect||(!target.eligible&&targetRoute?.status!=='known'))){
-    const blockedCount=(commitment.blockedCount??0)+1;
-    record.reservationRecovery={targetId:commitment.targetId,reason:!target?.effect?'effect-unavailable':'route-unavailable',blockedCount,released:blockedCount>=c.switchConfirmations};
-    if(blockedCount<c.switchConfirmations)return finish(waitAction('WAIT_TARGET_UNAVAILABLE',null,commitment.targetId),'WAIT_TARGET_UNAVAILABLE',{...commitment,status:'blocked',blockedCount});
-    commitment=null;
-  }
   if(commitment){
-    commitment={...commitment,blockedCount:0};
+    if(!target || !target.effect || (!target.eligible && targetRoute?.status!=='known'))return finish(waitAction('WAIT_TARGET_UNAVAILABLE',null,commitment.targetId),'WAIT_TARGET_UNAVAILABLE',{...commitment,status:'blocked'});
     const direct=target.eligible?eta(s,target.price,c.maxEvents):targetRoute.eta;
     const incumbent=target.eligible?singleById.get(target.id):{score:score(pathValues(targetRoute.path))};
     const challengerId=best.goalId??best.path[0]?.action.id;
@@ -215,7 +203,7 @@ export function plan(input) {
       commitment={...commitment,cooldown,challengerId:qualifies?challengerId:null,challengerCount:count};
       const viaBudget={remaining:c.maxUnlockNodes};
       const vias=offers.filter(o=>o.id!==target.id && o.eligible && o.effect && !o.rootOnly && eta(s,o.price,c.maxEvents)===0).map(o=>{
-        const next=applyAction(s,o,c.purchaseIntervalMs),afterTarget=allOffers(next).find(x=>x.id===target.id);
+        const next=applyAction(s,o),afterTarget=allOffers(next).find(x=>x.id===target.id);
         const route=afterTarget && !afterTarget.eligible?unlockRoute(next,target.id,c,viaBudget):null;
         const seconds=afterTarget?.eligible?eta(next,afterTarget.price,c.maxEvents):route?.status==='known'?route.eta:Infinity;
         return {actionId:o.id,seconds:known(seconds)};

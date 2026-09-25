@@ -10,8 +10,14 @@ import { plan as alpha10Plan } from './legacy/alpha10/planner.mjs';
 import { plan as alpha11Plan } from './legacy/alpha11/planner.mjs';
 import { plan as alpha12Plan } from './legacy/alpha12/planner.mjs';
 import { plan as alpha13Plan } from './legacy/alpha13/planner.mjs';
+import { plan as alpha14Plan } from './legacy/alpha14/planner.mjs';
 import { canonical } from '../src/core/contracts.mjs';
 export async function replay(snapshot){
+  if(snapshot.schemaVersion===1 && snapshot.input.engineVersion==='9.0.0-alpha.14' && snapshot.input.rulesetVersion==='cc-web-2.058/strategy-1'){
+    if(await hash(snapshot.input)!==snapshot.inputHash)throw new Error('InputChecksumMismatch');
+    const decision=alpha14Plan(snapshot.input);
+    return {matches:canonical(decision)===canonical(snapshot.decision),decision,engineVersion:'9.0.0-alpha.14'};
+  }
   if(snapshot.schemaVersion===1 && snapshot.input.engineVersion==='9.0.0-alpha.13' && snapshot.input.rulesetVersion==='cc-web-2.058/strategy-1'){
     if(await hash(snapshot.input)!==snapshot.inputHash)throw new Error('InputChecksumMismatch');
     const decision=alpha13Plan(snapshot.input);

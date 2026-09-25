@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeInput,clone } from '../src/core/contracts.mjs';
 import { plan } from '../src/core/planner.mjs';
+import { plan as historicalPlan } from '../scripts/legacy/alpha14/planner.mjs';
 import { applyAction,advance,allOffers,buildingPrice } from '../src/core/model.mjs';
 import { plan as previousPlan } from '../scripts/legacy/alpha4/planner.mjs';
 import { hash } from '../src/runtime/diagnostics.mjs';
@@ -16,10 +17,10 @@ function scenario(seed){
   buffs:seed%2?[{id:'x',remaining:7,passive:7,click:2}]:[],events:seed%3?[{at:31,effect:{flatPassive:100}}]:[],
   config:{horizons:[10,30,100],depth:3,beamWidth:8,maxNodes:80}});
 }
-test('tail-only evaluation agrees with full path replay across timed events and click rates',()=>{
+test('historical alpha14 tail-only evaluation agrees with full path replay across timed events and click rates',()=>{
  for(let seed=1;seed<=40;seed++){
   const current=scenario(seed),old={...clone(current),engineVersion:'9.0.0-alpha.4',rulesetVersion:'cc-web-2.058/basic-2'};
-  const a=plan(current),b=previousPlan(old);
+  const a=historicalPlan({...clone(current),engineVersion:'9.0.0-alpha.14'}),b=previousPlan(old);
   assert.deepEqual(a.selectedAction,b.selectedAction,'action seed '+seed);assert.deepEqual(a.nextCommitment,b.nextCommitment);
   assert.equal(a.expandedNodes.length,b.expandedNodes.length);
   for(let j=0;j<a.expandedNodes.length;j++)for(let k=0;k<3;k++)assert.ok(Math.abs(a.expandedNodes[j].value[k]-b.expandedNodes[j].value[k])<1e-8*Math.max(1,Math.abs(b.expandedNodes[j].value[k])),'value seed '+seed);

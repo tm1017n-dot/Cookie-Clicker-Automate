@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = '9.0.0-alpha.15';
+export const ENGINE_VERSION = '9.0.0-alpha.14';
 export const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
@@ -35,8 +35,6 @@ export function validateInput(input) {
   if (input.schemaVersion !== 1 || input.engineVersion !== ENGINE_VERSION || input.rulesetVersion !== RULESET_VERSION) throw new TypeError('VersionMismatch');
   const s = input.state, c = input.config;
   for (const key of ['bank', 'reserve', 'clickRate', 'elapsed']) if (!Number.isFinite(s[key]) || s[key] < 0) throw new TypeError('invalid state.' + key);
-  if(s.nextPurchaseAt!==undefined&&(!Number.isFinite(s.nextPurchaseAt)||s.nextPurchaseAt<0))throw new TypeError('invalid next purchase time');
-  if(!Number.isFinite(c.purchaseIntervalMs)||c.purchaseIntervalMs<=0)throw new TypeError('invalid purchase interval');
   for (const key of ['passive', 'clickUnit', 'clickFraction', 'nonCursorClick', 'deferred', 'earned']) if (!Number.isFinite(s[key])) throw new TypeError('invalid state.' + key);
   for (const key of ['depth', 'beamWidth', 'maxNodes', 'maxEvents']) if (!Number.isInteger(c[key]) || c[key] < 1) throw new TypeError('invalid config.' + key);
   if (c.depth > 5 || c.maxNodes > 10000 || c.maxEvents > 10000 || c.beamWidth > 128) throw new TypeError('unsafe planning budget');

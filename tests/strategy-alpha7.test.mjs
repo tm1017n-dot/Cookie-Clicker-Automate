@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeInput,clone } from '../src/core/contracts.mjs';
 import { plan } from '../src/core/planner.mjs';
+import { plan as historicalPlan } from '../scripts/legacy/alpha7/planner.mjs';
 import { plan as oldPlan } from '../scripts/legacy/alpha6/planner.mjs';
 import { eta } from '../src/core/model.mjs';
 import { eta as oldEta } from '../scripts/legacy/alpha6/model.mjs';
@@ -47,7 +48,7 @@ test('optimized planner preserves alpha6 decisions and horizon values without un
    {id:'upgrade:a',kind:'upgrade',price:100,effect:{flatPassive:10}},
    {id:'upgrade:b',kind:'upgrade',price:200,effect:{passiveMultiplier:2}}
   ],buffs:[{remaining:7,passive:7,click:2}],events:[{at:31,effect:{flatPassive:100}}]});
-  const prior={...clone(input),engineVersion:'9.0.0-alpha.6',rulesetVersion:'cc-web-2.058/strategy-1'},a=plan(input),b=oldPlan(prior);
+  const prior={...clone(input),engineVersion:'9.0.0-alpha.6',rulesetVersion:'cc-web-2.058/strategy-1'},a=historicalPlan({...clone(input),engineVersion:'9.0.0-alpha.7'}),b=oldPlan(prior);
   assert.deepEqual(a.selectedAction,b.selectedAction);assert.deepEqual(a.nextCommitment,b.nextCommitment);
   assert.equal(a.expandedNodes.length,b.expandedNodes.length);
   for(let j=0;j<a.expandedNodes.length;j++)for(let k=0;k<3;k++)assert.ok(Math.abs(a.expandedNodes[j].value[k]-b.expandedNodes[j].value[k])<1e-8*Math.max(1,Math.abs(b.expandedNodes[j].value[k])));

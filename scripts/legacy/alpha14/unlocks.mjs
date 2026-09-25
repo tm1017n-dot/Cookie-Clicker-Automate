@@ -16,7 +16,7 @@ export function unlockRoute(initial,targetId,config,budget={remaining:256}){
       if(!Number.isFinite(delay))throw new Error('unreachable');
       state=advance(state,delay,config.maxEvents);
       offer=offerById(state,id);
-      const after=applyAction(state,offer,config.purchaseIntervalMs);
+      const after=applyAction(state,offer);
       if(after){
         budget.remaining--;cost+=offer.price;state=after;limited=!!offer.rootOnly;
         const at=state.elapsed-initial.elapsed;
