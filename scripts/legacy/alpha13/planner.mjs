@@ -37,37 +37,10 @@ export function plan(input) {
   const target = commitment ? offers.find(o => o.id === commitment.targetId) : null;
   const unlockBudget={remaining:c.maxUnlockNodes};
   const goalDistance=o=>(o.requiresBuildings??[]).reduce((n,r)=>n+Math.max(0,r.amount-(s.buildings.find(b=>b.id===r.id)?.amount??0)),0)+Math.max(0,(o.requiresAchievements??0)-(s.production?.achievements??0));
-  const directRoutes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0 || o.requiresAchievements))
+  const routes=offers.filter(o=>!o.eligible && !o.disabled && o.effect && !o.rootOnly && ((o.requiresBuildings?.length??0)+(o.requiresOwned?.length??0)>0 || o.requiresAchievements))
     .sort((a,b)=>Number(b.id===commitment?.targetId)-Number(a.id===commitment?.targetId) || goalDistance(a)-goalDistance(b) || a.price-b.price || a.id.localeCompare(b.id,'en'))
-    .map(o=>({...unlockRoute(s,o.id,c,unlockBudget),variant:'direct',investmentId:null}));
-  const investmentBudget={remaining:c.maxUnlockNodes},investmentRoutes=[];
-  const relevance=(effect,buildingIds)=>{
-    let value=0;
-    if(effect.buildingPriceMultiplier!=null||effect.upgradePriceMultiplier!=null||effect.priceMultiplier!=null||effect.upgradePriceFactors?.length)value+=2;
-    for(const m of effect.buildingMultipliers??[])if(buildingIds.has(m.id))value+=3;
-    for(const r of effect.synergies??[])if(buildingIds.has(r.a)||buildingIds.has(r.b))value+=3;
-    return value;
-  };
-  for(const route of directRoutes){
-    if(route.status!=='known'||investmentRoutes.length>=c.maxGoalVariants)continue;
-    const goal=offers.find(o=>o.id===route.targetId),pathIds=new Set(route.path.map(step=>step.action.id));
-    const buildingIds=new Set([...(goal?.requiresBuildings??[]).map(r=>r.id),...route.path.filter(step=>step.action.kind==='building').map(step=>step.action.targetId)]);
-    const investments=offers.filter(o=>o.kind==='upgrade'&&o.id!==route.targetId&&o.eligible&&o.effect&&!o.rootOnly&&!pathIds.has(o.id)).map(o=>{
-      const wait=eta(s,o.price,c.maxEvents),delta=effectDelta(s,o,c.riskWeight),related=relevance(o.effect,buildingIds);
-      return {o,wait,related,rank:Number.isFinite(wait)?wait+(delta?.economic>0?o.price/delta.economic:1e12):Infinity};
-    }).filter(x=>Number.isFinite(x.wait)&&x.related>0).sort((a,b)=>b.related-a.related||a.rank-b.rank||a.o.price-b.o.price||a.o.id.localeCompare(b.o.id,'en')).slice(0,c.maxGoalInvestments);
-    for(const {o,wait} of investments){
-      if(investmentRoutes.length>=c.maxGoalVariants||investmentBudget.remaining<=0)break;
-      const ready=advance(s,wait,c.maxEvents),current=offerById(ready,o.id),after=current&&applyAction(ready,current);if(!after)continue;
-      const tail=unlockRoute(after,route.targetId,c,investmentBudget);if(tail.status!=='known')continue;
-      const lead=after.elapsed-s.elapsed,path=[{action:buyAction(current),at:lead,wait},...tail.path.map(step=>({...step,at:lead+step.at}))];
-      const combinedEta=lead+tail.eta;
-      if(combinedEta>=route.eta-Math.max(1/input.environment.fps,epsilon(route.eta,combinedEta)))continue;
-      investmentRoutes.push({...tail,targetId:route.targetId,path,cost:current.price+tail.cost,eta:combinedEta,variant:'investment',investmentId:o.id});
-    }
-  }
-  const routes=[...directRoutes,...investmentRoutes];
-  const targetRoute=target&&!target.eligible?routes.filter(r=>r.targetId===target.id&&r.status==='known').sort((a,b)=>a.eta-b.eta||a.cost-b.cost||String(a.investmentId).localeCompare(String(b.investmentId),'en'))[0]:null;
+    .map(o=>unlockRoute(s,o.id,c,unlockBudget));
+  const targetRoute=target && !target.eligible?routes.find(r=>r.targetId===target.id):null;
   const finiteT = candidates.filter(o => o.eligible && o.waitSeconds.status === 'known' && o.paybackSeconds.status === 'known').map(o => o.waitSeconds.value + o.paybackSeconds.value);
   const horizons = [...c.horizons];
   if (finiteT.length) horizons[2] = Math.max(horizons[2], 4 * Math.min(...finiteT));
@@ -157,11 +130,10 @@ export function plan(input) {
     if (nodeId > c.maxNodes) { if(!warnings.includes('node-budget'))warnings.push('node-budget'); break; }
   }
   for(const route of routes){
-    const entry={targetId:route.targetId,status:route.status,reason:route.reason??null,totalCost:route.cost,eta:route.eta,steps:route.path};
-    if(route.investmentId){entry.variant='investment';entry.investmentId=route.investmentId;}record.unlockPaths.push(entry);
+    const entry={targetId:route.targetId,status:route.status,reason:route.reason??null,totalCost:route.cost,eta:route.eta,steps:route.path};record.unlockPaths.push(entry);
     if(route.status!=='known' || route.eta>=horizons[2])continue;
     const value=pathValues(route.path);entry.value=value;
-    entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId,investmentId:route.investmentId});
+    entry.nodeId=nodeId;terminals.push({id:nodeId++,state:route.state,path:route.path,value,score:score(value),goalId:route.targetId});
   }
   const comparable=terminals.filter(n=>{
     if(n.path.length<=1 || !Number.isFinite(partialFloor))return true;
@@ -214,8 +186,7 @@ export function plan(input) {
       if(better.length)return finish(buyAction(offers.find(o=>o.id===better[0].actionId)),'BUY_ADVANCES_TARGET',{...commitment,status:'saving'});
       if(!target.eligible){
         record.plannedSteps=targetRoute.path;const first=targetRoute.path[0];
-        const buyReason=targetRoute.investmentId?'BUY_ADVANCES_TARGET':'BUY_UNLOCK_PREREQUISITE';
-        return first.wait>0?finish(waitAction('WAIT_UNLOCK_PREREQUISITE',first.wait,first.action.id),'WAIT_UNLOCK_PREREQUISITE',commitment):finish(first.action,buyReason,commitment);
+        return first.wait>0?finish(waitAction('WAIT_UNLOCK_PREREQUISITE',first.wait,first.action.id),'WAIT_UNLOCK_PREREQUISITE',commitment):finish(first.action,'BUY_UNLOCK_PREREQUISITE',commitment);
       }
       return finish(waitAction('WAIT_TARGET',Number.isFinite(direct)?direct:null,target.id),'WAIT_TARGET',{...commitment,status:Number.isFinite(direct)?'saving':'blocked'});
     }
@@ -228,8 +199,7 @@ export function plan(input) {
   }
   const first = best.path[0];
   if(best.goalId || record.reservationReview?.switched){
-    const stagedInvestment=best.investmentId===first.action.id?best.investmentId:null;
-    const next={...(record.reservationReview?.switched?commitment:{}),targetId:stagedInvestment??best.goalId??first.action.id,status:'saving'};
+    const next={...(record.reservationReview?.switched?commitment:{}),targetId:best.goalId??first.action.id,status:'saving'};
     return first.wait>0?finish(waitAction('WAIT_TARGET',first.wait,first.action.id),'WAIT_TARGET',next):finish(first.action,best.goalId?'BUY_UNLOCK_PREREQUISITE':'BUY_BEST_PLAN',next);
   }
   if (first.wait > 0) return finish(waitAction('WAIT_TARGET',first.wait,first.action.id),'WAIT_TARGET',{targetId:first.action.id,status:'saving'});

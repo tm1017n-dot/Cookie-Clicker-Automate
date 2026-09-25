@@ -1,5 +1,9 @@
 # 再構築版 9.0.0-alpha.1 実装記録
 
+## 9.0.0-alpha.14 長期目標への先行投資
+
+Tier・Kitten等の直接経路に加え、将来購入する対象施設の倍率、関連Synergy、施設・Upgrade価格割引を先に購入する経路を比較する。候補は1目標6件・全体24経路へ制限し、購入後は再計画する。詳細は[GOAL_INVESTMENTS_ALPHA14](GOAL_INVESTMENTS_ALPHA14.md)。
+
 ## 9.0.0-alpha.13 分割測定と長期目標
 
 状態取得の`CalculateGains`を1周期最大4回へ制限し、未測定Upgradeを後続周期へ送る。短期3手の詳細探索とは別に、次の施設Tier 2段階、Kitten 3段階、Synergy、Researchを最大512行動の目標経路として比較する。詳細は[BOUNDED_CAPTURE_LONG_GOALS_ALPHA13](BOUNDED_CAPTURE_LONG_GOALS_ALPHA13.md)。

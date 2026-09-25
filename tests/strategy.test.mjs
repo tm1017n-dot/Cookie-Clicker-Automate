@@ -18,6 +18,20 @@ test('goal route reaches milestones beyond the local search depth',()=>{
  ]}),route=unlockRoute(input.state,'upgrade:far',input.config);
  assert.equal(route.status,'known');assert.equal(route.path.length,41);assert.equal(route.path[0].action.id,'building:1');assert.equal(route.path.at(-1).action.id,'upgrade:far');
 });
+test('long goal route can buy an upgrade that strengthens future facilities',()=>{
+ const d=plan(makeInput({bank:10,passive:1,buildings:[{id:1,amount:0,unitCps:1,nextPrice:10,unroundedNextPrice:10,priceAtAmount:0,growth:1.15}],offers:[
+  {id:'upgrade:boost',kind:'upgrade',targetId:1,price:10,effect:{buildingMultipliers:[{id:1,multiplier:100}]}},
+  {id:'upgrade:goal',kind:'upgrade',targetId:2,price:100,requiresBuildings:[{id:1,amount:10}],effect:{buildingMultipliers:[{id:1,multiplier:10}]}}
+ ]})),direct=d.unlockPaths.find(r=>r.targetId==='upgrade:goal'&&!r.investmentId),invested=d.unlockPaths.find(r=>r.targetId==='upgrade:goal'&&r.investmentId==='upgrade:boost');
+ assert.ok(invested.eta<direct.eta);assert.equal(invested.steps[0].action.id,'upgrade:boost');assert.equal(d.selectedAction.id,'upgrade:boost');assert.equal(d.nextCommitment.targetId,'upgrade:boost');
+});
+test('long goal route compares a discount before future facilities and upgrade',()=>{
+ const d=plan(makeInput({bank:10,passive:10,buildings:[{id:1,amount:0,unitCps:1,nextPrice:100,unroundedNextPrice:100,priceAtAmount:0,growth:1.15}],offers:[
+  {id:'upgrade:discount',kind:'upgrade',targetId:1,price:10,effect:{buildingPriceMultiplier:.5,upgradePriceMultiplier:.5}},
+  {id:'upgrade:goal',kind:'upgrade',targetId:2,price:1000,requiresBuildings:[{id:1,amount:5}],effect:{buildingMultipliers:[{id:1,multiplier:10}]}}
+ ]})),direct=d.unlockPaths.find(r=>r.targetId==='upgrade:goal'&&!r.investmentId),discounted=d.unlockPaths.find(r=>r.targetId==='upgrade:goal'&&r.investmentId==='upgrade:discount');
+ assert.ok(discounted.totalCost<direct.totalCost);assert.ok(discounted.eta<direct.eta);
+});
 test('valuable unlock beyond ordinary search depth changes the first action',()=>{
  const input=makeInput(tierState()),d=plan(input);assert.equal(d.selectedAction.id,'building:1');assert.equal(d.nextCommitment.targetId,'upgrade:7');
  assert.equal(d.unlockPaths.find(r=>r.targetId==='upgrade:7').steps.length,5);

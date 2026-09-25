@@ -1,10 +1,9 @@
-export const ENGINE_VERSION = '9.0.0-alpha.14';
+export const ENGINE_VERSION = '9.0.0-alpha.13';
 export const RULESET_VERSION = 'cc-web-2.058/strategy-1';
 export const DEFAULT_CONFIG = Object.freeze({
   horizons: [60, 300, 900], weights: [0.2, 0.35, 0.45],
   depth: 3, beamWidth: 24, maxNodes: 1024, maxEvents: 4096,
   maxUnlockSteps:512,maxUnlockNodes:1024,
-  maxGoalInvestments:6,maxGoalVariants:24,
   switchMargin:.25,switchAbsolute:.05,switchConfirmations:3,switchCooldown:4,
   clickRate: 100, purchaseIntervalMs: 1500, riskWeight: 0.1,
   goldenSamples:8,goldenSeed:713,
@@ -39,7 +38,6 @@ export function validateInput(input) {
   for (const key of ['depth', 'beamWidth', 'maxNodes', 'maxEvents']) if (!Number.isInteger(c[key]) || c[key] < 1) throw new TypeError('invalid config.' + key);
   if (c.depth > 5 || c.maxNodes > 10000 || c.maxEvents > 10000 || c.beamWidth > 128) throw new TypeError('unsafe planning budget');
   for(const key of ['maxUnlockSteps','maxUnlockNodes','switchConfirmations','switchCooldown'])if(!Number.isInteger(c[key])||c[key]<1||c[key]>1024)throw new TypeError('invalid config.'+key);
-  for(const key of ['maxGoalInvestments','maxGoalVariants'])if(!Number.isInteger(c[key])||c[key]<1||c[key]>64)throw new TypeError('invalid config.'+key);
   for(const key of ['switchMargin','switchAbsolute'])if(!Number.isFinite(c[key])||c[key]<0||c[key]>10)throw new TypeError('invalid config.'+key);
   if (c.horizons.length !== 3 || c.weights.length !== 3 || c.horizons.some((h, i) => h <= 0 || (i && h <= c.horizons[i - 1])) || c.weights.some(w => w < 0) || c.weights.reduce((a,b) => a+b,0) <= 0) throw new TypeError('invalid horizons/weights');
   const ids = new Set();

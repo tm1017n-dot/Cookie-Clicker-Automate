@@ -9,7 +9,7 @@ const MAX_CLICK_BATCH=5;
 export class Coordinator {
   constructor(page,adapter,{config={},diagnostics=new Diagnostics(),clock=()=>Date.now(),onUpdate=()=>{},planner=plan}={}){
     this.page=page;this.adapter=adapter;this.config={...DEFAULT_CONFIG,...config};this.diagnostics=diagnostics;
-    this.clock=clock;this.onUpdate=onUpdate;this.planner=planner;this.version='9.0.0-alpha.13';this.generation=0;
+    this.clock=clock;this.onUpdate=onUpdate;this.planner=planner;this.version='9.0.0-alpha.14';this.generation=0;
     this.token=globalThis.crypto.randomUUID();this.stopped=false;this.running=false;this.commitment=null;
     this.cycle=0;this.timers=[];this.clicks=[];this.clickAttempts=[];this.started=clock();this.error=null;this.last=null;
     this.lastClickTick=null;this.clickCredit=0;
