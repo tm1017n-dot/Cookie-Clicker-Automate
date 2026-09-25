@@ -1,5 +1,7 @@
 # 再構築・詳細設計パッケージ
 
+alpha.15の継続シミュレーションによる改善点は[SIMULATION_ALPHA15](SIMULATION_ALPHA15.md)を参照。
+
 レビュー指摘4点の修正は[REVIEW_FIXES_ALPHA15](REVIEW_FIXES_ALPHA15.md)を参照。
 
 長期目標途中の強化・割引Upgradeは[GOAL_INVESTMENTS_ALPHA14](GOAL_INVESTMENTS_ALPHA14.md)を参照。
